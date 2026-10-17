@@ -1,36 +1,36 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PayTrace AI
+
+PayTrace AI is an AI-powered payment observability and recovery platform built for merchants and payment operations teams.
+
+It reconstructs payment lifecycles, detects mismatches between PayPal and merchant application state, explains likely root causes, and recommends safe recovery actions.
+
+## Key Capabilities
+
+- Payment lifecycle reconstruction
+- PayPal vs local state reconciliation
+- Duplicate operation detection
+- Refund safety checks
+- Webhook event analysis
+- AI-assisted incident investigation
+- Human approval for sensitive financial actions
+- Audit trail for recovery actions
+- Transaction and incident analysis with AG Grid
+
+## Tech Stack
+
+- Next.js
+- TypeScript
+- PayPal Sandbox
+- PayPal REST APIs
+- PayPal JavaScript SDK
+- AG Grid
+- OpenAI
+- PostgreSQL
+- Tailwind CSS
 
 ## Getting Started
 
-First, run the development server:
+Install dependencies:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+npm install
