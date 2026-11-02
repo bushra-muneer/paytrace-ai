@@ -1,67 +1,69 @@
+import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { invalidJson, readJsonBody } from "@/lib/http/responses";
+import { PayPalApiError, paypalRequest } from "@/lib/paypal/client";
+import type { PayPalOrder } from "@/lib/paypal/types";
+import { recordOrderCreated } from "@/lib/transactions/local-state";
 
-const PAYPAL_BASE_URL =
-  process.env.PAYPAL_BASE_URL || "https://api-m.sandbox.paypal.com";
+// body is optional, defaults to EUR 10.00
+export async function POST(request: NextRequest) {
+  const body = await readJsonBody<{ amount?: unknown; currency?: unknown }>(request);
+  if (!body) return invalidJson();
 
-async function getAccessToken() {
-  const clientId = process.env.PAYPAL_CLIENT_ID;
-  const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
+  const amount = body.amount === undefined ? "10.00" : String(body.amount);
+  const currency = body.currency === undefined ? "EUR" : String(body.currency).toUpperCase();
 
-  if (!clientId || !clientSecret) {
-    throw new Error("Missing PayPal credentials");
+  if (!/^\d+(\.\d{1,2})?$/.test(amount) || Number(amount) <= 0) {
+    return NextResponse.json(
+      { success: false, error: "amount must be a positive decimal like 10.00" },
+      { status: 400 }
+    );
+  }
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    return NextResponse.json(
+      { success: false, error: "currency must be a 3-letter ISO code" },
+      { status: 400 }
+    );
   }
 
-  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-
-  const response = await fetch(`${PAYPAL_BASE_URL}/v1/oauth2/token`, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: "grant_type=client_credentials",
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error("Failed to get PayPal access token");
-  }
-
-  const data = await response.json();
-  return data.access_token as string;
-}
-
-export async function GET(request: NextRequest) {
   try {
-    const orderId = request.nextUrl.searchParams.get("orderId");
+    const order = await paypalRequest<PayPalOrder>("/v2/checkout/orders", {
+      method: "POST",
+      headers: { "PayPal-Request-Id": randomUUID(), Prefer: "return=representation" },
+      body: JSON.stringify({
+        intent: "CAPTURE",
+        purchase_units: [
+          { amount: { currency_code: currency, value: Number(amount).toFixed(2) } },
+        ],
+      }),
+    });
 
-    if (!orderId) {
-      return NextResponse.json(
-        { error: "orderId is required" },
-        { status: 400 }
-      );
-    }
-
-    const accessToken = await getAccessToken();
-
-    const response = await fetch(
-      `${PAYPAL_BASE_URL}/v2/checkout/orders/${orderId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-        cache: "no-store",
-      }
+    // don't fail the request if only the local write breaks, reconcile will flag it
+    await recordOrderCreated(order).catch((error) =>
+      console.error(`Failed to record local order ${order.id}:`, error)
     );
 
-    const data = await response.json();
+    const approveUrl =
+      order.links?.find((l) => l.rel === "approve" || l.rel === "payer-action")?.href ?? null;
 
-    return NextResponse.json(data, { status: response.status });
+    return NextResponse.json({
+      success: true,
+      orderId: order.id,
+      status: order.status,
+      approveUrl,
+      order,
+    });
   } catch (error) {
+    if (error instanceof PayPalApiError) {
+      console.error("PayPal create order error:", error.details);
+      return NextResponse.json(
+        { success: false, error: "Failed to create PayPal order", details: error.details },
+        { status: error.status }
+      );
+    }
+    console.error("Create order error:", error);
     return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Unknown error",
-      },
+      { success: false, error: error instanceof Error ? error.message : "Unknown error" },
       { status: 500 }
     );
   }
