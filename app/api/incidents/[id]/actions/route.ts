@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Money, RecoveryActionType } from "@/lib/domain/types";
+import { rejectWithoutPasscode } from "@/lib/http/approver";
 import { errorResponse, invalidJson, readJsonBody } from "@/lib/http/responses";
 import { proposeAction } from "@/lib/recovery/actions";
+import { isAutomatedActor } from "@/lib/recovery/propose";
 
 const TYPES: ReadonlySet<string> = new Set<RecoveryActionType>([
   "SYNC_LOCAL_STATUS",
@@ -11,9 +13,16 @@ const TYPES: ReadonlySet<string> = new Set<RecoveryActionType>([
 
 // manual proposal, e.g. { type: "REFUND_CAPTURE", actor, rationale, amount: { currency, value } }
 export async function POST(request: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const denied = rejectWithoutPasscode(request);
+  if (denied) return denied;
+
   const { id } = await ctx.params;
   const body = await readJsonBody<{ type?: string; actor?: string; rationale?: string; amount?: Money }>(request);
   if (!body) return invalidJson();
+
+  if (body.actor && isAutomatedActor(body.actor.trim())) {
+    return NextResponse.json({ success: false, error: `"${body.actor}" is reserved for automated proposals` }, { status: 400 });
+  }
 
   if (!body.type || !TYPES.has(body.type) || !body.actor?.trim() || !body.rationale?.trim()) {
     return NextResponse.json(

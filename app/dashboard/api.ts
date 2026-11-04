@@ -1,5 +1,6 @@
 import type {
   Incident,
+  PaymentStatus,
   RecoveryAction,
   Transaction,
   WebhookEventRecord,
@@ -14,12 +15,27 @@ export interface IncidentDetail {
   actions: RecoveryAction[];
 }
 
+export interface AppConfig {
+  paypalClientId: string | null;
+  demoTools: boolean;
+  passcodeRequired: boolean;
+}
+
 export class ApiError extends Error {}
 
+let passcode = "";
+export function setPasscode(value: string) {
+  passcode = value;
+}
+
 async function call<T>(url: string, init?: { method?: string; body?: unknown }): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (init?.body) headers["Content-Type"] = "application/json";
+  if (passcode) headers["x-paytrace-passcode"] = passcode;
+
   const response = await fetch(url, {
     method: init?.method ?? "GET",
-    headers: init?.body ? { "Content-Type": "application/json" } : undefined,
+    headers,
     body: init?.body ? JSON.stringify(init.body) : undefined,
     cache: "no-store",
   });
@@ -33,6 +49,7 @@ async function call<T>(url: string, init?: { method?: string; body?: unknown }):
 const rows = <T,>(url: string) => call<{ rows: T[] }>(url).then((d) => d.rows);
 
 export const api = {
+  config: () => call<AppConfig>("/api/config"),
   transactions: () => rows<Transaction>("/api/transactions"),
   events: () => rows<EventRow>("/api/webhook-events"),
   incidents: () => rows<Incident>("/api/incidents"),
@@ -44,7 +61,8 @@ export const api = {
       method: "POST",
       body: {},
     }),
-  reconcile: (orderId: string) => call("/api/reconcile", { method: "POST", body: { orderId } }),
+  reconcile: (orderId: string) =>
+    call<{ openIncidents: Incident[] }>("/api/reconcile", { method: "POST", body: { orderId } }),
   investigate: (id: string) => call(`/api/incidents/${id}/investigate`, { method: "POST" }),
 
   createOrder: (amount: string, currency: string) =>
@@ -53,7 +71,12 @@ export const api = {
       body: { amount, currency },
     }),
   captureOrder: (orderId: string) =>
-    call("/api/paypal/capture-order", { method: "POST", body: { orderId } }),
+    call<{ orderId: string; captureStatus?: string }>("/api/paypal/capture-order", {
+      method: "POST",
+      body: { orderId },
+    }),
+  stageLocalStatus: (orderId: string, localStatus: PaymentStatus) =>
+    call("/api/demo/transactions", { method: "POST", body: { orderId, localStatus } }),
 
   decide: (
     id: string,

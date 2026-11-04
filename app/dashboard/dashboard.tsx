@@ -7,49 +7,28 @@ import {
   ModuleRegistry,
   themeQuartz,
   type ColDef,
+  type RowClassParams,
   type RowClickedEvent,
+  type RowStyle,
 } from "ag-grid-community";
 import { AgGridReact } from "ag-grid-react";
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { Incident, Money, RecoveryAction, Transaction } from "@/lib/domain/types";
-import { api, type EventRow, type IncidentDetail } from "./api";
+import { api, setPasscode, type AppConfig, type EventRow } from "./api";
+import PayPalCheckout from "./checkout";
+import { EventTimeline, IncidentPanel } from "./incident-panel";
+import { proposerLabel } from "./incident-panel";
+import { button, Card, ConfidenceMeter, Drawer, humanize, Icon, input, Kpi, Logo, money, Reconciliation, Severity, shortTime, Status, Tag, ThemeToggle, Toast, type Notice, type ThemePreference } from "./ui";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 type Tab = "incidents" | "transactions" | "events" | "actions";
 
-const TONE: Record<string, string> = {
-  CRITICAL: "bg-red-600 text-white",
-  HIGH: "bg-orange-500 text-white",
-  MEDIUM: "bg-amber-300 text-amber-950",
-  LOW: "bg-zinc-300 text-zinc-900",
-  OPEN: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
-  RESOLVED: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
-  PROPOSED: "bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-200",
-  APPROVED: "bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-200",
-  EXECUTED: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
-  REJECTED: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-  FAILED: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
-  PROCESSED: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
-  IGNORED: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-  "IN SYNC": "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
-  MISMATCH: "bg-red-600 text-white",
-  "NOT CHECKED": "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-  "NOT RUN": "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-};
-
-function Badge({ value }: { value: string | null | undefined }) {
-  if (!value) return <span className="text-zinc-400">-</span>;
-  return (
-    <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${TONE[value] ?? "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"}`}>
-      {value}
-    </span>
-  );
-}
-
-const badgeCell = (p: { value?: string | null }) => <Badge value={p.value} />;
-const money = (m: Money | null | undefined) => (m ? `${m.currency} ${m.value}` : "-");
-const time = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString() : "-");
+const tagCell = (p: { value?: string | null }) => <Tag value={p.value} />;
+const statusCell = (p: { value?: string | null }) => <Status value={p.value} />;
+const severityCell = (p: { value?: string | null }) => <Severity value={p.value} />;
+const reconciliationCell = (p: { value?: string | null }) => <Reconciliation value={p.value} />;
+const monoCell = (p: { value?: string | null }) => <span className="font-mono text-xs">{p.value ?? "-"}</span>;
 
 const SEVERITY_RANK: Record<string, number> = { LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
 
@@ -64,6 +43,7 @@ function moneyColumn<T>(headerName: string, get: (row: T) => Money | null | unde
     valueFormatter: (p) => money(p.data ? get(p.data) : null),
     filter: "agNumberColumnFilter",
     type: "rightAligned",
+    cellClass: "tabular-nums",
     width: 130,
   };
 }
@@ -72,6 +52,22 @@ function reconciliationState(tx: Transaction): string {
   if (!tx.lastReconciledAt || !tx.paypalStatus) return "NOT CHECKED";
   return tx.paypalStatus === tx.localStatus ? "IN SYNC" : "MISMATCH";
 }
+
+// inline style so it wins over the grid theme's row background
+const ALERT_ROW: RowStyle = { background: "rgba(239, 68, 68, 0.05)" };
+const incidentRowStyle = (p: RowClassParams<Incident>) =>
+  p.data?.status === "OPEN" && (p.data.severity === "CRITICAL" || p.data.severity === "HIGH") ? ALERT_ROW : undefined;
+const transactionRowStyle = (p: RowClassParams<Transaction>) =>
+  p.data && reconciliationState(p.data) === "MISMATCH" ? ALERT_ROW : undefined;
+
+const CURRENCIES = ["EUR", "USD", "GBP"];
+
+const EMPTY: Record<Tab, string> = {
+  incidents: "No incidents. Pay with the test checkout, then use Reconcile all.",
+  transactions: "No transactions yet. Use the PayPal button above to make a sandbox payment.",
+  events: "No webhook events yet. Register the webhook URL on your PayPal app to receive them.",
+  actions: "No recovery actions yet. They appear when an incident is detected or investigated.",
+};
 
 function usePrefersDark() {
   return useSyncExternalStore(
@@ -83,6 +79,37 @@ function usePrefersDark() {
     () => window.matchMedia("(prefers-color-scheme: dark)").matches,
     () => false
   );
+}
+
+// Light by default; the layout's inline script applies a saved choice before first paint.
+function useTheme(): [ThemePreference, (value: ThemePreference) => void, boolean] {
+  const [preference, setPreference] = useState<ThemePreference>("light");
+  const systemDark = usePrefersDark();
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("paytrace.theme");
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time restore from storage
+      if (saved === "dark" || saved === "system") setPreference(saved);
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
+
+  const dark = preference === "dark" || (preference === "system" && systemDark);
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", dark);
+  }, [dark]);
+
+  const update = (value: ThemePreference) => {
+    setPreference(value);
+    try {
+      localStorage.setItem("paytrace.theme", value);
+    } catch {
+      /* storage unavailable */
+    }
+  };
+  return [preference, update, dark];
 }
 
 function useActorName(): [string, (name: string) => void] {
@@ -106,9 +133,36 @@ function useActorName(): [string, (name: string) => void] {
   return [actor, update];
 }
 
+function useSecondsSince(timestamp: number | null) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(timer);
+  }, []);
+  return timestamp ? Math.max(0, Math.round((now - timestamp) / 1000)) : null;
+}
+
 export default function Dashboard() {
-  const dark = usePrefersDark();
-  const theme = useMemo(() => themeQuartz.withPart(dark ? colorSchemeDark : colorSchemeLight), [dark]);
+  const [themePreference, setThemePreference, dark] = useTheme();
+  const theme = useMemo(
+    () =>
+      themeQuartz.withPart(dark ? colorSchemeDark : colorSchemeLight).withParams({
+        accentColor: dark ? "#a1a1aa" : "#18181b",
+        fontFamily: "inherit",
+        fontSize: 13,
+        headerFontWeight: 600,
+        rowHeight: 42,
+        headerHeight: 40,
+        wrapperBorder: false,
+        wrapperBorderRadius: 0,
+        rowHoverColor: dark ? "rgba(255, 255, 255, 0.04)" : "rgba(0, 0, 0, 0.025)",
+        backgroundColor: dark ? "#18181b" : "#ffffff",
+        chromeBackgroundColor: dark ? "#1f1f23" : "#fafafa",
+        headerTextColor: dark ? "#a1a1aa" : "#52525b",
+        oddRowBackgroundColor: dark ? "#18181b" : "#ffffff",
+      }),
+    [dark]
+  );
 
   const [tab, setTab] = useState<Tab>("incidents");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -118,11 +172,25 @@ export default function Dashboard() {
   const [selectedIncident, setSelectedIncident] = useState<string | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [actor, setActor] = useActorName();
   const [newOrder, setNewOrder] = useState({ amount: "10.00", currency: "EUR" });
   const [approveUrl, setApproveUrl] = useState<string | null>(null);
   const [refreshCount, setRefreshCount] = useState(0);
+  const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [passcode, setPasscodeInput] = useState("");
+  const [search, setSearch] = useState("");
+  const secondsSinceRefresh = useSecondsSince(lastRefreshAt);
+
+  useEffect(() => {
+    api.config().then(setConfig).catch(() => setConfig(null));
+  }, []);
+
+  const updatePasscode = (value: string) => {
+    setPasscodeInput(value);
+    setPasscode(value);
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -132,6 +200,7 @@ export default function Dashboard() {
       setIncidents(i);
       setActions(a);
       setRefreshCount((n) => n + 1);
+      setLastRefreshAt(Date.now());
     } catch (error) {
       setNotice({ kind: "error", text: `Refresh failed: ${(error as Error).message}` });
     }
@@ -161,7 +230,10 @@ export default function Dashboard() {
     [refresh]
   );
 
+  const dismissNotice = useCallback(() => setNotice(null), []);
+
   const openIncidents = incidents.filter((i) => i.status === "OPEN");
+  const criticalOpen = openIncidents.filter((i) => i.severity === "CRITICAL").length;
   const atRisk = Object.entries(
     openIncidents.reduce<Record<string, number>>((acc, i) => {
       if (i.financialImpact) {
@@ -169,7 +241,12 @@ export default function Dashboard() {
       }
       return acc;
     }, {})
-  );
+  ).sort((a, b) => b[1] - a[1]);
+  const checked = transactions.filter((t) => reconciliationState(t) !== "NOT CHECKED");
+  const mismatched = transactions.filter((t) => reconciliationState(t) === "MISMATCH").length;
+  const pendingApproval = actions.filter((a) => a.status === "PROPOSED").length;
+  const failedEvents = events.filter((e) => e.processingStatus === "FAILED").length;
+  const duplicateDeliveries = events.reduce((n, e) => n + Math.max(0, e.deliveryCount - 1), 0);
 
   const awaitingApproval = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -180,126 +257,150 @@ export default function Dashboard() {
   // open first, then worst first, then most recent
   const incidentCols = useMemo<ColDef<Incident>[]>(
     () => [
-      { field: "status", cellRenderer: badgeCell, width: 110, sort: "asc", sortIndex: 0 },
+      { field: "status", cellRenderer: tagCell, width: 110, pinned: "left" },
       {
         field: "severity",
-        cellRenderer: badgeCell,
-        width: 120,
-        comparator: (a: string, b: string) => (SEVERITY_RANK[a] ?? 0) - (SEVERITY_RANK[b] ?? 0),
+        cellRenderer: severityCell,
+        width: 155,
+        pinned: "left",
+        // one sort key: open incidents first, then by severity
+        comparator: (a: string, b: string, nodeA, nodeB) =>
+          (nodeA.data?.status === "OPEN" ? 10 : 0) + (SEVERITY_RANK[a] ?? 0) -
+          ((nodeB.data?.status === "OPEN" ? 10 : 0) + (SEVERITY_RANK[b] ?? 0)),
         sort: "desc",
-        sortIndex: 1,
+        sortIndex: 0,
       },
-      { field: "type", width: 190 },
-      { field: "summary", flex: 2, minWidth: 240 },
-      { field: "paypalStatus", headerName: "PayPal", cellRenderer: badgeCell, width: 130 },
-      { field: "localStatus", headerName: "Local", cellRenderer: badgeCell, width: 130 },
-      moneyColumn<Incident>("At risk", (i) => i.financialImpact),
+      { field: "type", flex: 1, minWidth: 150, cellClass: "font-medium", valueFormatter: (p) => (p.value ? humanize(p.value) : "") },
+      { field: "paypalStatus", headerName: "PayPal", cellRenderer: statusCell, width: 120 },
+      { field: "localStatus", headerName: "Local", cellRenderer: statusCell, width: 120 },
+      { ...moneyColumn<Incident>("At risk", (i) => i.financialImpact), width: 115 },
       {
         headerName: "AI analysis",
-        valueGetter: (p) => (p.data?.aiAnalysis ? `${p.data.aiAnalysis.confidence} CONFIDENCE` : "NOT RUN"),
-        cellRenderer: badgeCell,
-        width: 160,
+        valueGetter: (p) => p.data?.aiAnalysis?.confidence ?? null,
+        cellRenderer: (p: { value: "LOW" | "MEDIUM" | "HIGH" | null }) =>
+          p.value ? <ConfidenceMeter level={p.value} /> : <span className="text-[13px] text-zinc-400">Not run</span>,
+        width: 155,
       },
       {
-        headerName: "Awaiting approval",
+        headerName: "Approvals",
         valueGetter: (p) => (p.data ? awaitingApproval[p.data.id] ?? 0 : 0),
+        cellRenderer: (p: { value: number }) => (p.value ? <Tag tone="blue">{p.value} pending</Tag> : <span className="text-zinc-400">-</span>),
         filter: "agNumberColumnFilter",
-        width: 150,
+        width: 115,
       },
-      { field: "orderId", width: 190 },
-      { field: "lastSeenAt", headerName: "Last seen", valueFormatter: (p) => time(p.value), width: 180, sort: "desc", sortIndex: 2 },
+      { field: "orderId", headerName: "Order", cellRenderer: monoCell, width: 170 },
+      { field: "lastSeenAt", headerName: "Last seen", valueFormatter: (p) => shortTime(p.value), width: 160, sort: "desc", sortIndex: 1 },
     ],
     [awaitingApproval]
   );
 
   const transactionCols = useMemo<ColDef<Transaction>[]>(
     () => [
-      { headerName: "Reconciliation", valueGetter: (p) => (p.data ? reconciliationState(p.data) : null), cellRenderer: badgeCell, width: 150 },
-      { field: "orderId", width: 190 },
-      { field: "localStatus", headerName: "Local", cellRenderer: badgeCell, width: 150 },
-      { field: "paypalStatus", headerName: "PayPal (last seen)", cellRenderer: badgeCell, width: 160 },
+      {
+        headerName: "Reconciliation",
+        valueGetter: (p) => (p.data ? reconciliationState(p.data) : null),
+        cellRenderer: reconciliationCell,
+        width: 150,
+        pinned: "left",
+      },
+      { field: "orderId", cellRenderer: monoCell, width: 190, pinned: "left" },
+      { field: "localStatus", headerName: "Local", cellRenderer: statusCell, width: 160 },
+      { field: "paypalStatus", headerName: "PayPal (last seen)", cellRenderer: statusCell, width: 170 },
       moneyColumn<Transaction>("Amount", (t) => t.amount),
-      { field: "captureId", width: 190 },
+      { field: "captureId", cellRenderer: monoCell, width: 190 },
       { field: "lastUpdatedBy", headerName: "Updated by", width: 120 },
-      { field: "lastReconciledAt", headerName: "Reconciled", valueFormatter: (p) => time(p.value), width: 180 },
-      { field: "updatedAt", headerName: "Updated", valueFormatter: (p) => time(p.value), flex: 1, sort: "desc" },
+      { field: "lastReconciledAt", headerName: "Reconciled", valueFormatter: (p) => shortTime(p.value), width: 140 },
+      { field: "updatedAt", headerName: "Updated", valueFormatter: (p) => shortTime(p.value), flex: 1, minWidth: 140, sort: "desc" },
     ],
     []
   );
 
   const eventCols = useMemo<ColDef<EventRow>[]>(
     () => [
-      { field: "eventType", width: 240 },
-      { field: "processingStatus", headerName: "Processing", cellRenderer: badgeCell, width: 130 },
-      { field: "orderId", width: 190 },
-      { field: "captureId", width: 190 },
+      { field: "eventType", cellRenderer: monoCell, width: 250 },
+      { field: "processingStatus", headerName: "Processing", cellRenderer: statusCell, width: 140 },
+      { field: "verification", cellRenderer: statusCell, width: 190 },
+      { field: "orderId", cellRenderer: monoCell, width: 190 },
+      { field: "captureId", cellRenderer: monoCell, width: 190 },
       { field: "resourceStatus", headerName: "Resource status", width: 140 },
       moneyColumn<EventRow>("Amount", (e) => e.amount),
-      { field: "deliveryCount", headerName: "Deliveries", filter: "agNumberColumnFilter", width: 120 },
-      { field: "verification", width: 170 },
+      { field: "deliveryCount", headerName: "Deliveries", filter: "agNumberColumnFilter", type: "rightAligned", width: 120 },
       { field: "processingError", headerName: "Note", flex: 1, minWidth: 200 },
-      { field: "lastReceivedAt", headerName: "Received", valueFormatter: (p) => time(p.value), width: 180, sort: "desc" },
+      { field: "lastReceivedAt", headerName: "Received", valueFormatter: (p) => shortTime(p.value), width: 140, sort: "desc" },
     ],
     []
   );
 
   const actionCols = useMemo<ColDef<RecoveryAction>[]>(
     () => [
-      { field: "status", cellRenderer: badgeCell, width: 120 },
-      { field: "type", width: 200 },
-      { field: "financial", headerName: "Moves money", valueFormatter: (p) => (p.value ? "Yes" : ""), width: 120 },
-      { field: "orderId", width: 190 },
+      { field: "status", cellRenderer: tagCell, width: 130, pinned: "left" },
+      { field: "type", width: 200, valueFormatter: (p) => (p.value ? humanize(p.value) : "") },
+      {
+        field: "financial",
+        headerName: "Moves money",
+        cellRenderer: (p: { value: boolean }) => (p.value ? <Tag tone="red">Yes</Tag> : <span className="text-zinc-400">-</span>),
+        width: 130,
+      },
+      moneyColumn<RecoveryAction>("Amount", (a) => a.params.amount),
+      { field: "orderId", cellRenderer: monoCell, width: 190 },
       { field: "rationale", flex: 2, minWidth: 260 },
-      { field: "proposedBy", width: 170 },
+      {
+        field: "proposedBy",
+        width: 170,
+        valueFormatter: (p) => (p.value ? proposerLabel(p.value) : ""),
+      },
       { field: "decidedBy", width: 130 },
-      { field: "proposedAt", headerName: "Proposed", valueFormatter: (p) => time(p.value), width: 180, sort: "desc" },
+      { field: "proposedAt", headerName: "Proposed", valueFormatter: (p) => shortTime(p.value), width: 140, sort: "desc" },
     ],
     []
   );
 
   const defaultColDef = useMemo<ColDef>(() => ({ sortable: true, filter: true, resizable: true }), []);
+  const overlay = (text: string) => `<span style="padding:2rem;color:#71717a;font-size:13px">${text}</span>`;
 
   const grid = (() => {
+    const shared = {
+      theme,
+      defaultColDef,
+      quickFilterText: search,
+      overlayNoRowsTemplate: overlay(EMPTY[tab]),
+      domLayout: "autoHeight" as const,
+      pagination: true,
+      paginationPageSize: 10,
+      paginationPageSizeSelector: [10, 25, 50],
+      suppressCellFocus: true,
+    };
     switch (tab) {
       case "incidents":
         return (
           <AgGridReact<Incident>
-            theme={theme}
+            {...shared}
             rowData={incidents}
             columnDefs={incidentCols}
-            defaultColDef={defaultColDef}
             getRowId={(p) => p.data.id}
+            getRowStyle={incidentRowStyle}
             onRowClicked={(e: RowClickedEvent<Incident>) => e.data && setSelectedIncident(e.data.id)}
           />
         );
       case "transactions":
         return (
           <AgGridReact<Transaction>
-            theme={theme}
+            {...shared}
             rowData={transactions}
             columnDefs={transactionCols}
-            defaultColDef={defaultColDef}
             getRowId={(p) => p.data.orderId}
+            getRowStyle={transactionRowStyle}
             onRowClicked={(e: RowClickedEvent<Transaction>) => e.data && setSelectedOrder(e.data.orderId)}
           />
         );
       case "events":
-        return (
-          <AgGridReact<EventRow>
-            theme={theme}
-            rowData={events}
-            columnDefs={eventCols}
-            defaultColDef={defaultColDef}
-            getRowId={(p) => p.data.eventId}
-          />
-        );
+        return <AgGridReact<EventRow> {...shared} rowData={events} columnDefs={eventCols} getRowId={(p) => p.data.eventId} />;
       case "actions":
         return (
           <AgGridReact<RecoveryAction>
-            theme={theme}
+            {...shared}
             rowData={actions}
             columnDefs={actionCols}
-            defaultColDef={defaultColDef}
             getRowId={(p) => p.data.id}
             onRowClicked={(e: RowClickedEvent<RecoveryAction>) => e.data && setSelectedIncident(e.data.incidentId)}
           />
@@ -309,419 +410,334 @@ export default function Dashboard() {
 
   const selectedTx = transactions.find((t) => t.orderId === selectedOrder) ?? null;
 
+  const tabs: [Tab, string, number][] = [
+    ["incidents", "Incidents", openIncidents.length],
+    ["transactions", "Transactions", transactions.length],
+    ["events", "Webhook events", events.length],
+    ["actions", "Recovery actions", actions.length],
+  ];
+
   return (
-    <div className="flex min-h-screen flex-col gap-4 bg-zinc-50 p-4 text-zinc-900 sm:p-6 dark:bg-zinc-950 dark:text-zinc-100">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">PayTrace AI</h1>
-          <p className="text-sm text-zinc-500">Payment observability and recovery | PayPal Sandbox</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <label className="flex items-center gap-1">
-            <span className="text-zinc-500">Acting as</span>
-            <input
-              value={actor}
-              onChange={(e) => setActor(e.target.value)}
-              placeholder="your name"
-              className="w-32 rounded border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
-            />
-          </label>
-          <button
-            onClick={() =>
-              run("reconcile", async () => {
-                const r = await api.reconcileAll();
-                const failed = r.errors.length ? `, ${r.errors.length} could not be checked` : "";
-                setNotice({ kind: r.errors.length ? "error" : "ok", text: `Checked ${r.reconciled} orders against PayPal: ${r.inSync} in sync${failed}` });
-              })
-            }
-            disabled={busy !== null}
-            className="rounded bg-zinc-900 px-3 py-1.5 font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-          >
-            {busy === "reconcile" ? "Reconciling..." : "Reconcile all"}
-          </button>
-          <button onClick={() => void refresh()} className="rounded border border-zinc-300 px-3 py-1.5 dark:border-zinc-700">
-            Refresh
-          </button>
+    <div className="min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+      <header className="sticky top-0 z-40 border-b border-zinc-200 bg-white/85 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/85">
+        <div className="mx-auto flex max-w-[1500px] flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
+          <div className="flex items-center gap-3">
+            <Logo />
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-lg font-semibold tracking-tight">PayTrace AI</h1>
+                <Tag tone="amber">Sandbox</Tag>
+              </div>
+              <p className="text-xs text-zinc-500">Payment observability and recovery for PayPal merchants</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="hidden items-center gap-1.5 text-xs text-zinc-500 md:inline-flex">
+              <span className="size-1.5 rounded-full bg-emerald-500" />
+              {secondsSinceRefresh === null ? "Connecting..." : `Live, updated ${secondsSinceRefresh}s ago`}
+            </span>
+            <ThemeToggle value={themePreference} onChange={(v: ThemePreference) => setThemePreference(v)} />
+            <input value={actor} onChange={(e) => setActor(e.target.value)} placeholder="Acting as (your name)" aria-label="Acting as" className={`${input} w-44`} />
+            {config?.passcodeRequired && (
+              <input
+                type="password"
+                value={passcode}
+                onChange={(e) => updatePasscode(e.target.value)}
+                placeholder="Approver passcode"
+                aria-label="Approver passcode"
+                className={`${input} w-40`}
+              />
+            )}
+            <button
+              onClick={() =>
+                run("reconcile", async () => {
+                  const r = await api.reconcileAll();
+                  const failed = r.errors.length ? `, ${r.errors.length} could not be checked` : "";
+                  setNotice({ kind: r.errors.length ? "error" : "ok", text: `Checked ${r.reconciled} orders against PayPal: ${r.inSync} in sync${failed}` });
+                })
+              }
+              disabled={busy !== null}
+              className={button.primary}
+            >
+              <Icon name="refresh" className={`size-3.5 ${busy === "reconcile" ? "animate-spin" : ""}`} />
+              {busy === "reconcile" ? "Reconciling..." : "Reconcile all"}
+            </button>
+          </div>
         </div>
       </header>
 
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
-        <Kpi label="Open incidents" value={openIncidents.length} alert={openIncidents.length > 0} />
-        <Kpi
-          label="Money at risk"
-          value={atRisk.length ? atRisk.map(([c, v]) => `${c} ${v.toFixed(2)}`).join(" | ") : "-"}
-          alert={atRisk.length > 0}
-        />
-        <Kpi label="Awaiting approval" value={actions.filter((a) => a.status === "PROPOSED").length} />
-        <Kpi label="Transactions" value={transactions.length} />
-        <Kpi
-          label="Webhook events"
-          value={events.length}
-          sub={`${events.filter((e) => e.processingStatus === "FAILED").length} failed`}
-        />
-      </section>
+      <main className="mx-auto flex max-w-[1500px] flex-col gap-5 px-4 py-5 sm:px-6">
+        <section className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+          <Kpi
+            label="Open incidents"
+            value={openIncidents.length}
+            sub={criticalOpen ? `${criticalOpen} critical` : "nothing critical"}
+            alert={openIncidents.length > 0}
+            onClick={() => setTab("incidents")}
+          />
+          <Kpi
+            label="Money at risk"
+            value={
+              atRisk.length ? (
+                <>
+                  <span className="mr-1 text-[0.6em] font-medium">{atRisk[0][0]}</span>
+                  {atRisk[0][1].toFixed(2)}
+                </>
+              ) : (
+                "0.00"
+              )
+            }
+            sub={
+              atRisk.length > 1
+                ? `+ ${atRisk.slice(1).map(([c, v]) => `${c} ${v.toFixed(2)}`).join(", ")}`
+                : "across open incidents"
+            }
+            alert={atRisk.length > 0}
+          />
+          <Kpi label="Awaiting approval" value={pendingApproval} sub="proposed recovery actions" onClick={() => setTab("actions")} />
+          <Kpi
+            label="Reconciliation"
+            value={checked.length ? `${checked.length - mismatched}/${checked.length}` : "-"}
+            sub={mismatched ? `${mismatched} out of sync with PayPal` : "orders in sync with PayPal"}
+            alert={mismatched > 0}
+            onClick={() => setTab("transactions")}
+          />
+          <Kpi
+            label="Webhook events"
+            value={events.length}
+            sub={`${failedEvents} failed, ${duplicateDeliveries} duplicates absorbed`}
+            onClick={() => setTab("events")}
+          />
+        </section>
 
-      <section className="flex flex-wrap items-center gap-2 rounded border border-zinc-200 bg-white p-3 text-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <span className="font-medium">New sandbox order</span>
-        <input
-          value={newOrder.amount}
-          onChange={(e) => setNewOrder({ ...newOrder, amount: e.target.value })}
-          className="w-20 rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
-        />
-        <input
-          value={newOrder.currency}
-          onChange={(e) => setNewOrder({ ...newOrder, currency: e.target.value })}
-          className="w-16 rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
-        />
-        <button
-          disabled={busy !== null}
-          onClick={() =>
-            run("create", async () => {
-              const r = await api.createOrder(newOrder.amount, newOrder.currency);
-              setApproveUrl(r.approveUrl);
-              setNotice({ kind: "ok", text: `Created order ${r.orderId}. Approve it as the sandbox buyer, then capture it from the Transactions tab.` });
-            })
-          }
-          className="rounded border border-zinc-300 px-3 py-1 disabled:opacity-50 dark:border-zinc-700"
-        >
-          Create
-        </button>
-        {approveUrl && (
-          <a href={approveUrl} target="_blank" rel="noopener noreferrer" className="text-sky-600 underline">
-            Open PayPal approval page
-          </a>
-        )}
-      </section>
+        <section className="grid gap-3 lg:grid-cols-5">
+          <Card title="Test checkout" className="lg:col-span-2" aside={<span className="text-xs text-zinc-500">PayPal Sandbox buyer</span>}>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                value={newOrder.amount}
+                onChange={(e) => setNewOrder({ ...newOrder, amount: e.target.value })}
+                aria-label="Amount"
+                className={`${input} w-24 tabular-nums`}
+              />
+              <select
+                value={newOrder.currency}
+                onChange={(e) => setNewOrder({ ...newOrder, currency: e.target.value })}
+                aria-label="Currency"
+                className={input}
+              >
+                {CURRENCIES.map((c) => (
+                  <option key={c}>{c}</option>
+                ))}
+              </select>
+              <button
+                disabled={busy !== null}
+                onClick={() =>
+                  run("create", async () => {
+                    const r = await api.createOrder(newOrder.amount, newOrder.currency);
+                    setApproveUrl(r.approveUrl);
+                    setNotice({ kind: "ok", text: `Created order ${r.orderId} without paying. Approve it, then capture it from Transactions.` });
+                  })
+                }
+                className={button.secondary}
+              >
+                Create order only
+              </button>
+            </div>
+            {config?.paypalClientId && /^\d+(\.\d{1,2})?$/.test(newOrder.amount) && (
+              <div className="mt-3 max-w-sm">
+                <PayPalCheckout
+                  clientId={config.paypalClientId}
+                  amount={newOrder.amount}
+                  currency={newOrder.currency}
+                  onCaptured={(orderId, status) => {
+                    setNotice({ kind: "ok", text: `Paid with PayPal: order ${orderId}, capture ${status ?? "submitted"}` });
+                    void refresh();
+                  }}
+                  onError={(message) => setNotice({ kind: "error", text: message })}
+                />
+              </div>
+            )}
+            {approveUrl && (
+              <a href={approveUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-[13px] font-medium text-sky-700 underline-offset-2 hover:underline dark:text-sky-400">
+                Open PayPal approval page
+              </a>
+            )}
+          </Card>
 
-      {notice && (
-        <div
-          role="status"
-          className={`rounded px-3 py-2 text-sm ${notice.kind === "ok" ? "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200" : "bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200"}`}
-        >
-          {notice.text}
-        </div>
-      )}
+          <Card title="How an incident gets handled" className="lg:col-span-3">
+            <ol className="grid text-xs sm:grid-cols-5 sm:divide-x sm:divide-zinc-200 dark:sm:divide-zinc-800">
+              {[
+                ["Detect", "Reconciliation compares live PayPal state with our record."],
+                ["Investigate", "AI reads the evidence and explains cause and impact."],
+                ["Propose", "AI and the system can suggest fixes, nothing more."],
+                ["Approve", "A person decides. Refunds need a second confirmation."],
+                ["Execute", "PayPal is re-checked, the fix runs, every step is logged."],
+              ].map(([title, text], i) => (
+                <li key={title} className="py-2 sm:px-3 sm:py-0 sm:first:pl-0 sm:last:pr-0">
+                  <div className="font-mono text-[11px] text-zinc-400">0{i + 1}</div>
+                  <div className="mt-0.5 text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">{title}</div>
+                  <p className="mt-1 leading-relaxed text-zinc-500">{text}</p>
+                </li>
+              ))}
+            </ol>
+          </Card>
+        </section>
 
-      <nav className="flex gap-1 border-b border-zinc-200 text-sm dark:border-zinc-800">
-        {(
-          [
-            ["incidents", `Incidents (${openIncidents.length} open)`],
-            ["transactions", `Transactions (${transactions.length})`],
-            ["events", `Webhook events (${events.length})`],
-            ["actions", `Recovery actions (${actions.length})`],
-          ] as [Tab, string][]
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            className={`-mb-px border-b-2 px-3 py-2 ${tab === key ? "border-zinc-900 font-medium dark:border-zinc-100" : "border-transparent text-zinc-500"}`}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
+        <section className="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800">
+            <nav className="flex flex-wrap gap-0.5 rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800/70" aria-label="Views">
+              {tabs.map(([key, label, count]) => (
+                <button
+                  key={key}
+                  onClick={() => setTab(key)}
+                  className={`flex items-center gap-2 rounded-[5px] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                    tab === key
+                      ? "bg-white text-zinc-900 shadow-[0_1px_2px_rgba(0,0,0,0.08)] dark:bg-zinc-950 dark:text-zinc-100"
+                      : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                  }`}
+                >
+                  {label}
+                  <span
+                    className={`min-w-5 rounded-[3px] px-1 text-center text-[11px] font-medium tabular-nums ${
+                      key === "incidents" && count > 0 ? "bg-red-600 text-white" : "bg-zinc-200/80 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300"
+                    }`}
+                  >
+                    {count}
+                  </span>
+                </button>
+              ))}
+            </nav>
+            <label className="relative">
+              <Icon name="search" className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-zinc-400" />
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search orders, captures, events..."
+                aria-label="Search grid"
+                className={`${input} w-72 pl-8`}
+              />
+            </label>
+          </div>
+          {/* keyed per tab: each view gets its own grid instance, otherwise column state leaks between tabs */}
+          <div key={tab}>{grid}</div>
+        </section>
+      </main>
 
-      <div className="h-[560px] min-h-0">{grid}</div>
+      <Toast notice={notice} onClose={dismissNotice} />
 
       {selectedIncident && (
-        <IncidentPanel
-          id={selectedIncident}
-          actor={actor}
-          refreshCount={refreshCount}
-          onClose={() => setSelectedIncident(null)}
-          run={run}
-        />
+        <IncidentPanel id={selectedIncident} actor={actor} refreshCount={refreshCount} onClose={() => setSelectedIncident(null)} run={run} />
       )}
 
       {selectedTx && (
-        <Drawer title={`Order ${selectedTx.orderId}`} onClose={() => setSelectedOrder(null)}>
-          <dl className="grid grid-cols-2 gap-2 text-sm">
-            <dt className="text-zinc-500">Local status</dt>
-            <dd><Badge value={selectedTx.localStatus} /></dd>
-            <dt className="text-zinc-500">PayPal (last seen)</dt>
-            <dd><Badge value={selectedTx.paypalStatus} /></dd>
-            <dt className="text-zinc-500">Amount</dt>
-            <dd>{money(selectedTx.amount)}</dd>
-            <dt className="text-zinc-500">Capture</dt>
-            <dd className="font-mono text-xs">{selectedTx.captureId ?? "-"}</dd>
+        <Drawer
+          title={<span className="font-mono">{selectedTx.orderId}</span>}
+          eyebrow={
+            <>
+              <Reconciliation value={reconciliationState(selectedTx)} />
+              <span className="text-xs font-medium text-zinc-500">PayPal order</span>
+            </>
+          }
+          onClose={() => setSelectedOrder(null)}
+        >
+          <dl className="grid grid-cols-2 gap-3 rounded-xl border border-zinc-200 bg-white p-4 text-sm dark:border-zinc-800 dark:bg-zinc-900">
+            <div>
+              <dt className="text-xs text-zinc-500">Our record</dt>
+              <dd className="mt-1"><Status value={selectedTx.localStatus} /></dd>
+            </div>
+            <div>
+              <dt className="text-xs text-zinc-500">PayPal (last seen)</dt>
+              <dd className="mt-1"><Status value={selectedTx.paypalStatus} /></dd>
+            </div>
+            <div>
+              <dt className="text-xs text-zinc-500">Amount</dt>
+              <dd className="mt-1 font-semibold tabular-nums">{money(selectedTx.amount)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-zinc-500">Capture</dt>
+              <dd className="mt-1 truncate font-mono text-xs">{selectedTx.captureId ?? "-"}</dd>
+            </div>
           </dl>
-          <div className="mt-4 flex gap-2 text-sm">
+
+          <div className="flex flex-wrap gap-2">
             <button
               disabled={busy !== null}
-              onClick={() => run("reconcile-one", () => api.reconcile(selectedTx.orderId), "Order reconciled")}
-              className="rounded bg-zinc-900 px-3 py-1.5 text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+              onClick={() => run("reconcile-one", () => api.reconcile(selectedTx.orderId), "Order reconciled against PayPal")}
+              className={button.primary}
             >
-              Reconcile
+              <Icon name="refresh" className="size-3.5" /> Reconcile with PayPal
             </button>
             {(selectedTx.localStatus === "APPROVED" || selectedTx.localStatus === "CREATED") && (
               <button
                 disabled={busy !== null}
                 onClick={() => run("capture", () => api.captureOrder(selectedTx.orderId), "Capture submitted")}
-                className="rounded border border-zinc-300 px-3 py-1.5 disabled:opacity-50 dark:border-zinc-700"
+                className={button.secondary}
               >
                 Capture payment
               </button>
             )}
           </div>
-          <h3 className="mt-6 mb-2 text-sm font-medium">Webhook events</h3>
-          <EventTimeline events={events.filter((e) => e.orderId === selectedTx.orderId)} />
+
+          {config?.demoTools && selectedTx.localStatus === "COMPLETED" && (
+            <div className="rounded-xl border border-dashed border-amber-400 bg-amber-50/60 p-4 text-sm dark:border-amber-700 dark:bg-amber-500/5">
+              <p className="font-semibold text-amber-900 dark:text-amber-200">Demo: simulate a lost update</p>
+              <p className="mt-1 text-xs text-amber-800/80 dark:text-amber-200/70">
+                Pretends our app crashed right after PayPal captured the payment, so the order is still PENDING locally.
+              </p>
+              <button
+                disabled={busy !== null}
+                onClick={() =>
+                  run(
+                    "stage",
+                    async () => {
+                      await api.stageLocalStatus(selectedTx.orderId, "PENDING");
+                      const result = await api.reconcile(selectedTx.orderId);
+                      const incident = result.openIncidents[0];
+                      if (incident) {
+                        setSelectedOrder(null);
+                        setSelectedIncident(incident.id);
+                      }
+                    },
+                    "Local record set to PENDING and reconciled against PayPal"
+                  )
+                }
+                className="mt-3 inline-flex items-center rounded-md bg-amber-500 px-3 py-1.5 text-sm font-medium text-amber-950 shadow-sm transition hover:bg-amber-400 disabled:opacity-50"
+              >
+                Simulate lost update
+              </button>
+            </div>
+          )}
+
+          {incidents.some((i) => i.orderId === selectedTx.orderId) && (
+            <Card title="Incidents">
+              <ul className="space-y-1">
+                {incidents
+                  .filter((i) => i.orderId === selectedTx.orderId)
+                  .map((i) => (
+                    <li key={i.id}>
+                      <button
+                        onClick={() => {
+                          setSelectedOrder(null);
+                          setSelectedIncident(i.id);
+                        }}
+                        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                      >
+                        <Severity value={i.severity} /> <Tag value={i.status} />
+                        <span className="flex-1 truncate">{i.summary}</span>
+                        <Icon name="arrow" className="size-4 text-zinc-400" />
+                      </button>
+                    </li>
+                  ))}
+              </ul>
+            </Card>
+          )}
+
+          <Card title="Webhook events">
+            <EventTimeline events={events.filter((e) => e.orderId === selectedTx.orderId)} />
+          </Card>
         </Drawer>
       )}
     </div>
-  );
-}
-
-function Kpi({ label, value, sub, alert }: { label: string; value: string | number; sub?: string; alert?: boolean }) {
-  return (
-    <div className="rounded border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="text-xs uppercase tracking-wide text-zinc-500">{label}</div>
-      <div className={`mt-1 text-xl font-semibold tabular-nums ${alert ? "text-red-600 dark:text-red-400" : ""}`}>{value}</div>
-      {sub && <div className="text-xs text-zinc-500">{sub}</div>}
-    </div>
-  );
-}
-
-function Drawer({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
-      <aside
-        className="h-full w-full max-w-xl overflow-y-auto bg-white p-5 shadow-xl dark:bg-zinc-900"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-4 flex items-start justify-between gap-2">
-          <h2 className="text-lg font-semibold">{title}</h2>
-          <button onClick={onClose} aria-label="Close" className="text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100">
-            x
-          </button>
-        </div>
-        {children}
-      </aside>
-    </div>
-  );
-}
-
-function EventTimeline({ events }: { events: EventRow[] }) {
-  if (events.length === 0) return <p className="text-sm text-zinc-500">No webhook events received for this order.</p>;
-  return (
-    <ol className="space-y-2 border-l border-zinc-200 pl-4 text-sm dark:border-zinc-700">
-      {[...events]
-        .sort((a, b) => a.firstReceivedAt.localeCompare(b.firstReceivedAt))
-        .map((e) => (
-          <li key={e.eventId}>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-xs">{e.eventType}</span>
-              <Badge value={e.processingStatus} />
-              {e.deliveryCount > 1 && <span className="text-xs text-zinc-500">x{e.deliveryCount}</span>}
-            </div>
-            <div className="text-xs text-zinc-500">
-              {time(e.firstReceivedAt)}
-              {e.processingError ? ` | ${e.processingError}` : ""}
-            </div>
-          </li>
-        ))}
-    </ol>
-  );
-}
-
-function IncidentPanel({
-  id,
-  actor,
-  refreshCount,
-  onClose,
-  run,
-}: {
-  id: string;
-  actor: string;
-  refreshCount: number;
-  onClose: () => void;
-  run: (label: string, fn: () => Promise<unknown>, success?: string) => Promise<void>;
-}) {
-  const [detail, setDetail] = useState<IncidentDetail | null>(null);
-  const [investigating, setInvestigating] = useState(false);
-  const [ack, setAck] = useState<Record<string, boolean>>({});
-
-  const load = useCallback(() => api.incident(id).then(setDetail).catch(() => setDetail(null)), [id]);
-  useEffect(() => {
-    void load();
-  }, [load, refreshCount]);
-
-  if (!detail) {
-    return (
-      <Drawer title="Incident" onClose={onClose}>
-        <p className="text-sm text-zinc-500">Loading...</p>
-      </Drawer>
-    );
-  }
-
-  const { incident, events, actions } = detail;
-  const ai = incident.aiAnalysis;
-  const needActor = !actor.trim();
-
-  const decide = (action: RecoveryAction, operation: "approve" | "reject" | "execute") =>
-    run(
-      `${operation}-${action.id}`,
-      async () => {
-        await api.decide(action.id, operation, {
-          actor,
-          acknowledgeFinancialImpact: operation === "approve" ? ack[action.id] : undefined,
-        });
-        await load();
-      },
-      `Action ${operation === "execute" ? "executed" : operation + "d"}`
-    );
-
-  return (
-    <Drawer title={incident.summary} onClose={onClose}>
-      <div className="flex flex-wrap gap-2">
-        <Badge value={incident.severity} />
-        <Badge value={incident.status} />
-        <span className="text-xs text-zinc-500">{incident.type}</span>
-      </div>
-
-      <dl className="mt-4 grid grid-cols-2 gap-2 text-sm">
-        <dt className="text-zinc-500">Order</dt>
-        <dd className="font-mono text-xs">{incident.orderId}</dd>
-        <dt className="text-zinc-500">PayPal</dt>
-        <dd><Badge value={incident.paypalStatus} /></dd>
-        <dt className="text-zinc-500">Local</dt>
-        <dd><Badge value={incident.localStatus} /></dd>
-        <dt className="text-zinc-500">Financial impact</dt>
-        <dd>{money(incident.financialImpact)}</dd>
-        <dt className="text-zinc-500">Detected</dt>
-        <dd>{time(incident.detectedAt)}</dd>
-      </dl>
-
-      <section className="mt-6">
-        <div className="mb-2 flex items-center justify-between">
-          <h3 className="text-sm font-medium">AI investigation</h3>
-          <button
-            disabled={investigating}
-            onClick={async () => {
-              setInvestigating(true);
-              await run("investigate", () => api.investigate(id), "Investigation complete");
-              await load();
-              setInvestigating(false);
-            }}
-            className="rounded bg-violet-600 px-3 py-1 text-sm font-medium text-white disabled:opacity-50"
-          >
-            {investigating ? "Investigating..." : ai ? "Re-investigate" : "Investigate with AI"}
-          </button>
-        </div>
-        {ai ? (
-          <div className="space-y-3 rounded border border-violet-200 bg-violet-50 p-3 text-sm dark:border-violet-900 dark:bg-violet-950/40">
-            <p>
-              <span className="font-medium">Root cause:</span> {ai.rootCause}{" "}
-              <span className="text-xs text-zinc-500">({ai.confidence} confidence)</span>
-            </p>
-            <p className="whitespace-pre-line">{ai.explanation}</p>
-            <p><span className="font-medium">Financial impact:</span> {ai.financialImpact.summary}</p>
-            <p><span className="font-medium">Customer impact:</span> {ai.customerImpact}</p>
-            {ai.recommendedActions.length > 0 && (
-              <div>
-                <p className="font-medium">Recommended</p>
-                <ul className="list-disc pl-5">
-                  {ai.recommendedActions.map((r, i) => (
-                    <li key={i}>
-                      <span className="font-mono text-xs">{r.type}</span> ({r.risk} risk): {r.description}
-                    </li>
-                  ))}
-                </ul>
-                <p className="text-xs text-zinc-500">Saved as proposals below. Nothing runs until a person approves it.</p>
-              </div>
-            )}
-            {ai.evidenceAssessment.length > 0 && (
-              <ul className="list-disc pl-5 text-xs">
-                {ai.evidenceAssessment.map((e, i) => (
-                  <li key={i}><span className="font-mono">{e.reference}</span>: {e.interpretation}</li>
-                ))}
-              </ul>
-            )}
-            <p className="text-xs text-zinc-500">{ai.model} | {time(ai.generatedAt)}</p>
-          </div>
-        ) : (
-          <p className="text-sm text-zinc-500">Not investigated yet.</p>
-        )}
-      </section>
-
-      <section className="mt-6">
-        <h3 className="mb-2 text-sm font-medium">Recovery actions</h3>
-        {needActor && (
-          <p className="mb-2 text-xs text-amber-700 dark:text-amber-400">Enter your name in the Acting as box to approve or execute.</p>
-        )}
-        {actions.length === 0 && <p className="text-sm text-zinc-500">No actions proposed.</p>}
-        <ul className="space-y-2">
-          {actions.map((a) => (
-            <li key={a.id} className="rounded border border-zinc-200 p-3 text-sm dark:border-zinc-700">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge value={a.status} />
-                <span className="font-medium">{a.type}</span>
-                {a.financial && <span className="rounded bg-red-600 px-1.5 text-xs text-white">moves money</span>}
-                {a.params.amount && <span className="text-xs">{money(a.params.amount)}</span>}
-              </div>
-              <p className="mt-1">{a.rationale}</p>
-              <ol className="mt-2 space-y-0.5 border-l border-zinc-200 pl-3 text-xs text-zinc-500 dark:border-zinc-700">
-                {a.audit.map((entry, i) => (
-                  <li key={i}>
-                    <span className="font-medium text-zinc-700 dark:text-zinc-300">{entry.event}</span> by {entry.actor}, {time(entry.at)}
-                    {entry.detail && entry.event !== "PROPOSED" ? `: ${entry.detail}` : ""}
-                  </li>
-                ))}
-              </ol>
-              {a.status === "PROPOSED" && (
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  {a.financial && (
-                    <label className="flex items-center gap-1 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={!!ack[a.id]}
-                        onChange={(e) => setAck({ ...ack, [a.id]: e.target.checked })}
-                      />
-                      I understand this moves real money
-                    </label>
-                  )}
-                  <button
-                    disabled={needActor || (a.financial && !ack[a.id])}
-                    onClick={() => decide(a, "approve")}
-                    className="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white disabled:opacity-40"
-                  >
-                    Approve
-                  </button>
-                  <button
-                    disabled={needActor}
-                    onClick={() => decide(a, "reject")}
-                    className="rounded border border-zinc-300 px-2 py-1 text-xs disabled:opacity-40 dark:border-zinc-600"
-                  >
-                    Reject
-                  </button>
-                </div>
-              )}
-              {a.status === "APPROVED" && (
-                <button
-                  disabled={needActor}
-                  onClick={() => decide(a, "execute")}
-                  className="mt-2 rounded bg-zinc-900 px-2 py-1 text-xs font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
-                >
-                  Execute
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="mt-6">
-        <h3 className="mb-2 text-sm font-medium">Evidence</h3>
-        <ul className="space-y-1 text-xs">
-          {incident.evidence.map((e, i) => (
-            <li key={i}>
-              <span className="rounded bg-zinc-100 px-1 dark:bg-zinc-800">{e.source}</span>{" "}
-              <span className="font-mono">{e.reference}</span>: {e.detail}
-            </li>
-          ))}
-        </ul>
-        <h3 className="mt-4 mb-2 text-sm font-medium">Webhook timeline</h3>
-        <EventTimeline events={events} />
-      </section>
-    </Drawer>
   );
 }

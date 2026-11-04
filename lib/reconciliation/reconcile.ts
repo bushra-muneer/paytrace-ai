@@ -125,7 +125,7 @@ function detect(
     source: "local_db",
     reference: transaction.orderId,
     observedAt,
-    detail: `Local status ${transaction.localStatus} (last updated by ${transaction.lastUpdatedBy} at ${transaction.updatedAt})`,
+    detail: `Local status ${transaction.localStatus}, last updated by ${transaction.lastUpdatedBy} at ${transaction.updatedAt.slice(0, 16).replace("T", " ")} UTC`,
     data: transaction,
   };
   const evidence = [paypalEvidence, localEvidence, ...webhookEvidence];

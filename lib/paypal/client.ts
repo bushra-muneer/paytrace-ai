@@ -67,10 +67,12 @@ export async function paypalRequest<T>(
     method?: "GET" | "POST";
     body?: string;
     headers?: Record<string, string>;
+    timeoutMs?: number;
   } = {}
 ): Promise<T> {
   const accessToken = await getAccessToken();
 
+  // a request that never answers must fail, so callers can treat it as an unknown outcome
   const response = await fetch(`${PAYPAL_BASE_URL}${pathname}`, {
     method: init.method ?? "GET",
     headers: {
@@ -80,6 +82,7 @@ export async function paypalRequest<T>(
     },
     body: init.body,
     cache: "no-store",
+    signal: AbortSignal.timeout(init.timeoutMs ?? 30_000),
   });
 
   const data = await safeJson(response);
@@ -93,6 +96,12 @@ export async function paypalRequest<T>(
   }
 
   return data as T;
+}
+
+// Issue codes from a PayPal error body, e.g. ["PREVIOUS_REQUEST_IN_PROGRESS"].
+export function paypalIssues(error: PayPalApiError): string[] {
+  const body = error.details as { name?: string; details?: { issue?: string }[] } | null;
+  return [body?.name, ...(body?.details?.map((d) => d.issue) ?? [])].filter((x): x is string => !!x);
 }
 
 async function safeJson(response: Response): Promise<unknown> {

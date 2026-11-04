@@ -11,6 +11,8 @@ export interface PayPalLink {
 export interface PayPalWebhookResource {
   id?: string;
   status?: string;
+  update_time?: string;
+  invoice_id?: string;
   amount?: { currency_code: string; value: string };
   links?: PayPalLink[];
   supplementary_data?: {
@@ -38,8 +40,15 @@ export interface PayPalPurchaseUnit {
   amount?: { currency_code: string; value: string };
   payments?: {
     captures?: PayPalCapture[];
-    refunds?: { id: string; status: string }[];
+    refunds?: PayPalRefund[];
   };
+}
+
+export interface PayPalRefund {
+  id: string;
+  status: string;
+  amount?: { currency_code: string; value: string };
+  invoice_id?: string;
 }
 
 export interface PayPalOrder {

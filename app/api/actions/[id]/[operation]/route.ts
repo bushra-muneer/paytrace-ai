@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
+import { rejectWithoutPasscode } from "@/lib/http/approver";
 import { errorResponse, invalidJson, readJsonBody } from "@/lib/http/responses";
 import { approveAction, executeAction, rejectAction } from "@/lib/recovery/actions";
 
 // POST /api/actions/:id/(approve|reject|execute) with { actor, note?, acknowledgeFinancialImpact? }
-// TODO: no auth yet, actor is just whatever name gets sent
+// The actor name is self-declared; PAYTRACE_APPROVER_PASSCODE is the only gate for now.
 export async function POST(
   request: NextRequest,
   ctx: { params: Promise<{ id: string; operation: string }> }
 ) {
+  const denied = rejectWithoutPasscode(request);
+  if (denied) return denied;
+
   const { id, operation } = await ctx.params;
   const body = await readJsonBody<{ actor?: string; note?: string; acknowledgeFinancialImpact?: boolean }>(request);
   if (!body) return invalidJson();

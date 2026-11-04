@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { RecoveryAction, RecoveryActionType } from "@/lib/domain/types";
+import type { RecoveryAction, RecoveryActionStatus, RecoveryActionType, RefundOperation } from "@/lib/domain/types";
 import type { Database } from "@/lib/storage/store";
 
 export class RecoveryActionError extends Error {
@@ -34,12 +34,19 @@ export function proposeActionInDb(db: Database, input: ProposeInput): RecoveryAc
   if (duplicate) return duplicate;
 
   if (input.type === "REFUND_CAPTURE") {
-    const existing = findOtherRefund(db, incident.orderId);
-    if (existing) {
+    const unresolved = findUnresolvedRefund(db, incident.orderId);
+    if (unresolved) {
       throw new RecoveryActionError(
-        `Order already has a refund action (${existing.id}, ${existing.status})`,
+        `Order already has an unresolved refund (${unresolved.id}, ${unresolved.status})`,
         409
       );
+    }
+    // a follow-up refund after one went through is a human decision, never an automated one
+    const done = Object.values(db.recoveryActions).find(
+      (a) => a.type === "REFUND_CAPTURE" && a.orderId === incident.orderId && a.status === "EXECUTED"
+    );
+    if (done && isAutomatedActor(input.proposedBy)) {
+      throw new RecoveryActionError(`Order was already refunded by ${done.id}; only a person can propose another refund`, 409);
     }
   }
 
@@ -73,18 +80,33 @@ export function proposeActionInDb(db: Database, input: ProposeInput): RecoveryAc
   return action;
 }
 
-// One refund per order. Rejected refunds and ones that failed before money could
-// move don't count. A FAILED refund with an unknown outcome (timeout, 5xx) still
-// blocks, since PayPal may have processed it.
-export function findOtherRefund(db: Database, orderId: string, exceptId?: string) {
+const UNRESOLVED: ReadonlySet<RecoveryActionStatus> = new Set(["PROPOSED", "APPROVED", "EXECUTING", "UNCERTAIN"]);
+
+// A refund on this order that hasn't reached a final outcome. While one exists, no other
+// refund for the order can be proposed or run, so two refunds never race and an UNCERTAIN
+// one gets resolved first (by retrying with its own request id). Older FAILED records
+// without a definite "no money moved" are treated as unresolved too.
+export function findUnresolvedRefund(db: Database, orderId: string, exceptId?: string) {
   return Object.values(db.recoveryActions).find(
     (a) =>
       a.type === "REFUND_CAPTURE" &&
       a.orderId === orderId &&
       a.id !== exceptId &&
-      a.status !== "REJECTED" &&
-      !(a.status === "FAILED" && (a.result as { moneyMoved?: unknown } | null)?.moneyMoved === false)
+      (UNRESOLVED.has(a.status) ||
+        (a.status === "FAILED" && (a.result as { moneyMoved?: unknown } | null)?.moneyMoved !== false))
   );
+}
+
+// Called once, when a refund is approved. The same ids go on the first request and every retry.
+export function newRefundOperation(actionId: string): RefundOperation {
+  return {
+    requestId: randomUUID(),
+    invoiceId: `paytrace-${actionId}`,
+    attempts: 0,
+    lastAttemptAt: null,
+    refundId: null,
+    refundStatus: null,
+  };
 }
 
 // "system" and "ai:<model>" can propose but never approve or execute.

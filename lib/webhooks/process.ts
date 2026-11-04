@@ -126,10 +126,18 @@ function applyToTransaction(
     transaction.amount = record.amount;
   }
 
-  if (isForwardTransition(transaction.localStatus, nextStatus)) {
+  // PayPal doesn't guarantee delivery order. An event must be at least as new as the
+  // last one applied (resource update_time) and must not move the status backwards.
+  const eventTime = (record.payload as PayPalWebhookEvent).resource?.update_time ?? record.eventCreatedAt;
+  const lastApplied = transaction.lastEventUpdateTime ?? null;
+
+  if (eventTime && lastApplied && Date.parse(eventTime) < Date.parse(lastApplied)) {
+    record.processingError = `Stale event: resource updated ${eventTime}, a newer update (${lastApplied}) was already applied`;
+  } else if (isForwardTransition(transaction.localStatus, nextStatus)) {
     transaction.localStatus = nextStatus;
     transaction.lastUpdatedBy = "webhook";
     transaction.updatedAt = now;
+    if (eventTime) transaction.lastEventUpdateTime = eventTime;
     record.processingStatus = "PROCESSED";
   } else {
     record.processingError = staleReason(transaction.localStatus, nextStatus);

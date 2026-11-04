@@ -26,6 +26,8 @@ export interface Transaction {
   paypalStatus: PaymentStatus | null; // last value seen from the PayPal API
   lastReconciledAt: string | null;
   lastUpdatedBy: "webhook" | "api" | "manual" | "seed";
+  // newest PayPal resource update_time applied from a webhook; older events are ignored
+  lastEventUpdateTime?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -119,7 +121,20 @@ export type RecoveryActionStatus =
   | "REJECTED"
   | "EXECUTING"
   | "EXECUTED"
-  | "FAILED";
+  | "FAILED"
+  // refund sent but the outcome is unknown (timeout, 5xx, request still in progress);
+  // can only be retried with the same PayPal-Request-Id
+  | "UNCERTAIN";
+
+// Identity of one refund operation, fixed at approval and reused on every retry.
+export interface RefundOperation {
+  requestId: string; // PayPal-Request-Id
+  invoiceId: string; // sent as invoice_id, used to find the refund at PayPal later
+  attempts: number;
+  lastAttemptAt: string | null;
+  refundId: string | null;
+  refundStatus: string | null;
+}
 
 export interface AuditEntry {
   at: string;
@@ -149,5 +164,6 @@ export interface RecoveryAction {
   executedAt: string | null;
   result: unknown | null;
   error: string | null;
+  refundOperation?: RefundOperation | null; // refunds only, set when approved
   audit: AuditEntry[];
 }

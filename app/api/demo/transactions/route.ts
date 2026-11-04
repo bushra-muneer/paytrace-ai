@@ -1,21 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
+import { demoToolsEnabled } from "@/lib/config";
 import type { Money, PaymentStatus, Transaction } from "@/lib/domain/types";
+import { rejectWithoutPasscode } from "@/lib/http/approver";
 import { invalidJson, readJsonBody } from "@/lib/http/responses";
 import { withDb } from "@/lib/storage/store";
 
-// Dev only: force a local status to reproduce incidents.
-// e.g. { "orderId": "...", "localStatus": "PENDING" } then call /api/reconcile
+const STAGEABLE: ReadonlySet<string> = new Set<PaymentStatus>(["CREATED", "APPROVED", "PENDING", "COMPLETED", "REFUNDED"]);
+
+// Demo tool: force a local status to stage an incident, e.g. pretend the app
+// crashed after PayPal captured the payment: { "orderId": "...", "localStatus": "PENDING" }
 export async function POST(request: NextRequest) {
-  if (process.env.NODE_ENV === "production") {
+  if (!demoToolsEnabled()) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
+  const denied = rejectWithoutPasscode(request);
+  if (denied) return denied;
 
   const body = await readJsonBody<{ orderId?: string; localStatus?: PaymentStatus; amount?: Money }>(request);
   if (!body) return invalidJson();
 
-  if (!body.orderId || !body.localStatus) {
+  if (!body.orderId || !body.localStatus || !STAGEABLE.has(body.localStatus)) {
     return NextResponse.json(
-      { success: false, error: "orderId and localStatus are required" },
+      { success: false, error: `orderId and localStatus (${[...STAGEABLE].join(", ")}) are required` },
       { status: 400 }
     );
   }
