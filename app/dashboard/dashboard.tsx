@@ -627,7 +627,14 @@ export default function Dashboard() {
       <Toast notice={notice} onClose={dismissNotice} />
 
       {selectedIncident && (
-        <IncidentPanel id={selectedIncident} actor={actor} refreshCount={refreshCount} onClose={() => setSelectedIncident(null)} run={run} />
+        <IncidentPanel
+          id={selectedIncident}
+          actor={actor}
+          refreshCount={refreshCount}
+          aiProvider={config?.aiProvider ?? null}
+          onClose={() => setSelectedIncident(null)}
+          run={run}
+        />
       )}
 
       {selectedTx && (

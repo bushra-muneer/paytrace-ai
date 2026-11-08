@@ -2,6 +2,9 @@
   "name": "paytrace-ai",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -14,6 +17,7 @@
     "ag-grid-community": "^36.2.0",
     "ag-grid-react": "^36.2.0",
     "next": "16.3.8",
+    "openai": "^7.50.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "zod": "^4.6.7"

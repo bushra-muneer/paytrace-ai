@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { Incident, RecoveryAction, RecoveryActionType } from "@/lib/domain/types";
+import type { Incident, Money, RecoveryAction, RecoveryActionType } from "@/lib/domain/types";
 import { api, type EventRow, type IncidentDetail } from "./api";
-import { button, Card, ConfidenceMeter, Drawer, humanize, Icon, money, Progress, Severity, Status, Tag, time, type Step } from "./ui";
+import { button, Card, ConfidenceMeter, Drawer, humanize, Icon, input, money, Progress, Severity, Status, Tag, time, type Step } from "./ui";
 
 const ACTION_LABEL: Record<RecoveryActionType, string> = {
   SYNC_LOCAL_STATUS: "Sync local status to PayPal",
@@ -69,16 +69,79 @@ export function EventTimeline({ events }: { events: EventRow[] }) {
   );
 }
 
+function RefundProposal({
+  defaultAmount,
+  disabled,
+  onPropose,
+}: {
+  defaultAmount: Money | null;
+  disabled: boolean;
+  onPropose: (amount: Money, reason: string) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState(defaultAmount?.value ?? "");
+  const [reason, setReason] = useState("");
+  const currency = defaultAmount?.currency ?? "EUR";
+  const valid = /^\d+(\.\d{1,2})?$/.test(value) && Number(value) > 0 && reason.trim().length > 0;
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)} className={`${button.secondary} mb-3`}>
+        Propose a refund
+      </button>
+    );
+  }
+
+  return (
+    <form
+      className="mb-3 rounded-md border border-dashed border-red-300 p-3 dark:border-red-900/60"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        await onPropose({ currency, value }, reason.trim());
+        setOpen(false);
+        setReason("");
+      }}
+    >
+      <div className="text-[13px] font-semibold">Propose a refund</div>
+      <p className="mt-0.5 text-xs text-zinc-500">
+        This only creates a proposal. Someone else has to approve it, and PayPal is re-checked before money moves.
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-zinc-500">{currency}</span>
+        <input value={value} onChange={(e) => setValue(e.target.value)} aria-label="Refund amount" className={`${input} w-24 tabular-nums`} />
+        <input
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="Reason, e.g. customer asked to cancel"
+          aria-label="Refund reason"
+          className={`${input} min-w-0 flex-1`}
+        />
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        <button type="submit" disabled={disabled || !valid} className={button.primary}>
+          Propose refund
+        </button>
+        <button type="button" onClick={() => setOpen(false)} className={button.secondary}>
+          Cancel
+        </button>
+        {disabled && <span className="text-xs text-amber-700 dark:text-amber-400">Enter your name in &quot;Acting as&quot; first</span>}
+      </div>
+    </form>
+  );
+}
+
 export function IncidentPanel({
   id,
   actor,
   refreshCount,
+  aiProvider,
   onClose,
   run,
 }: {
   id: string;
   actor: string;
   refreshCount: number;
+  aiProvider: "anthropic" | "openai" | null;
   onClose: () => void;
   run: (label: string, fn: () => Promise<unknown>, success?: string) => Promise<void>;
 }) {
@@ -102,7 +165,11 @@ export function IncidentPanel({
   const { incident, events, actions } = detail;
   const ai = incident.aiAnalysis;
   const needActor = !actor.trim();
-  const inSync = incident.paypalStatus === incident.localStatus;
+  // current state, not the snapshot taken at detection (that goes stale once the incident is fixed)
+  const paypalNow = detail.transaction?.paypalStatus ?? incident.paypalStatus;
+  const localNow = detail.transaction ? detail.transaction.localStatus : incident.localStatus;
+  const inSync = paypalNow === localNow;
+  const fundsCaptured = paypalNow === "COMPLETED" || paypalNow === "PARTIALLY_REFUNDED";
 
   const decide = (action: RecoveryAction, operation: "approve" | "reject" | "execute") =>
     run(
@@ -142,14 +209,14 @@ export function IncidentPanel({
 
       <section className="grid grid-cols-2 divide-x divide-zinc-200 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="p-4">
-          <Eyebrow>PayPal, live</Eyebrow>
-          <div className="mt-2 text-base font-semibold"><Status value={incident.paypalStatus} /></div>
+          <Eyebrow>PayPal, last checked</Eyebrow>
+          <div className="mt-2 text-base font-semibold"><Status value={paypalNow} /></div>
           <div className="mt-1 text-xs text-zinc-500">Source of truth</div>
         </div>
         <div className={`p-4 ${inSync ? "" : "bg-red-50/60 dark:bg-red-500/5"}`}>
           <Eyebrow>Our record</Eyebrow>
           <div className="mt-2 text-base font-semibold">
-            {incident.localStatus ? <Status value={incident.localStatus} /> : <span className="text-[13px] text-red-700">Missing</span>}
+            {localNow ? <Status value={localNow} /> : <span className="text-[13px] text-red-700">Missing</span>}
           </div>
           <div className={`mt-1 text-xs ${inSync ? "text-zinc-500" : "font-medium text-red-700 dark:text-red-400"}`}>
             {inSync ? "Matches PayPal" : "Out of sync with PayPal"}
@@ -173,9 +240,16 @@ export function IncidentPanel({
       </dl>
 
       <Card
-        title="AI investigation"
+        title={
+          <span>
+            AI investigation
+            {aiProvider && (
+              <span className="ml-2 text-xs font-normal text-zinc-500">via {aiProvider === "anthropic" ? "Claude" : "OpenAI"}</span>
+            )}
+          </span>
+        }
         aside={
-          <button disabled={investigating} onClick={investigate} className={button.ai}>
+          <button disabled={investigating || !aiProvider} onClick={investigate} className={button.ai}>
             <Icon name="sparkle" className="size-3.5" />
             {investigating ? "Investigating..." : ai ? "Run again" : "Investigate"}
           </button>
@@ -193,6 +267,11 @@ export function IncidentPanel({
           <p className="text-[13px] leading-relaxed text-zinc-500">
             The investigator reads the live PayPal order, our record and every webhook for this order, then explains what
             happened and what it costs. It can propose fixes but never run them.
+            {!aiProvider && (
+              <span className="mt-2 block text-amber-700 dark:text-amber-400">
+                No AI provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env.local and restart.
+              </span>
+            )}
           </p>
         )}
         {ai && (
@@ -272,6 +351,22 @@ export function IncidentPanel({
         aside={needActor && <span className="text-xs text-amber-700 dark:text-amber-400">Enter your name in &quot;Acting as&quot; to decide</span>}
       >
         {actions.length === 0 && <p className="text-[13px] text-zinc-500">No actions proposed.</p>}
+        {fundsCaptured && (
+          <RefundProposal
+            defaultAmount={incident.financialImpact}
+            disabled={needActor}
+            onPropose={(amount, reason) =>
+              run(
+                "propose-refund",
+                async () => {
+                  await api.proposeRefund(id, { actor, rationale: reason, amount });
+                  await load();
+                },
+                "Refund proposed. Another person has to approve it."
+              )
+            }
+          />
+        )}
         <ul className="space-y-3">
           {actions.map((a) => (
             <li

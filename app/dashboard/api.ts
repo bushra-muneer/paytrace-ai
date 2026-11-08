@@ -1,5 +1,6 @@
 import type {
   Incident,
+  Money,
   PaymentStatus,
   RecoveryAction,
   Transaction,
@@ -19,6 +20,7 @@ export interface AppConfig {
   paypalClientId: string | null;
   demoTools: boolean;
   passcodeRequired: boolean;
+  aiProvider: "anthropic" | "openai" | null;
 }
 
 export class ApiError extends Error {}
@@ -77,6 +79,11 @@ export const api = {
     }),
   stageLocalStatus: (orderId: string, localStatus: PaymentStatus) =>
     call("/api/demo/transactions", { method: "POST", body: { orderId, localStatus } }),
+  proposeRefund: (incidentId: string, body: { actor: string; rationale: string; amount: Money }) =>
+    call<{ action: RecoveryAction }>(`/api/incidents/${incidentId}/actions`, {
+      method: "POST",
+      body: { type: "REFUND_CAPTURE", ...body },
+    }),
 
   decide: (
     id: string,

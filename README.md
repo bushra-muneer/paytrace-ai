@@ -21,7 +21,7 @@ flowchart LR
   Local --> Rec[Reconciliation]
   PayPal -- live order state --> Rec
   Rec --> Inc[Incidents]
-  Inc --> AI[Claude investigator]
+  Inc --> AI["AI investigator<br/>Claude or OpenAI"]
   AI --> Prop[Proposed actions]
   Rec --> Prop
   Prop --> Human{Human approval}
@@ -39,7 +39,7 @@ flowchart LR
 
 ## How it uses AI
 
-`POST /api/incidents/:id/investigate` sends Claude the incident, the live PayPal order, the local record, the webhook history and earlier recovery actions. It returns structured, schema-validated output:
+`POST /api/incidents/:id/investigate` sends the configured model (Claude or OpenAI) the incident, the live PayPal order, the local record, the webhook history and earlier recovery actions. It returns structured, schema-validated output:
 
 - root cause and explanation, citing the evidence
 - confidence
@@ -98,7 +98,7 @@ Four linked grids: incidents, transactions, webhook events and recovery actions.
 
 ```bash
 npm install
-cp .env.example .env.local   # add PayPal Sandbox credentials and ANTHROPIC_API_KEY
+cp .env.example .env.local   # add PayPal Sandbox credentials and ANTHROPIC_API_KEY or OPENAI_API_KEY
 npm run dev
 ```
 
@@ -121,7 +121,9 @@ Optional safety beat: propose a refund, approve it with the money-moving acknowl
 |---|---|
 | `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_BASE_URL` | PayPal REST app (Sandbox) |
 | `PAYPAL_WEBHOOK_ID` | Required to verify real webhooks |
-| `ANTHROPIC_API_KEY` | AI investigator |
+| `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | AI investigator (Claude is used if both are set) |
+| `PAYTRACE_AI_PROVIDER` | Force `anthropic` or `openai` |
+| `PAYTRACE_AI_MODEL`, `PAYTRACE_OPENAI_MODEL` | Model per provider (defaults `claude-opus-5-5`, `gpt-4.1`) |
 | `PAYTRACE_DEMO_MODE=true` | Enables *Simulate lost update* on a production deploy (always on locally) |
 | `PAYTRACE_APPROVER_PASSCODE` | Requires a passcode for approvals, staging and AI runs |
 | `PAYTRACE_SIMULATED_WEBHOOK_SECRET` | Local webhook simulator only; ignored in production |
@@ -146,7 +148,17 @@ Events sent from PayPal's Webhooks Simulator can't be verified; use real sandbox
 
 ## Deploying
 
-Storage is a single JSON file, so deploy to one instance with a persistent disk (Render, Railway or Fly.io with a volume) and point `PAYTRACE_DB_PATH` at it. Serverless hosts such as Vercel lose the file between requests. For a public demo, set `PAYTRACE_DEMO_MODE=true` and `PAYTRACE_APPROVER_PASSCODE`.
+Storage is a single JSON file, so deploy to one instance with a persistent disk and point `PAYTRACE_DB_PATH` at it. Serverless hosts such as Vercel lose the file between requests.
+
+On Railway:
+
+1. New project → Deploy from GitHub repo. Railway detects Next.js and runs `npm run build` / `npm start`.
+2. Add a volume to the service, mounted at `/data`.
+3. Set the variables: the PayPal and AI keys from `.env.example`, plus `PAYTRACE_DB_PATH=/data/paytrace-db.json`, `PAYTRACE_DEMO_MODE=true` and `PAYTRACE_APPROVER_PASSCODE`.
+4. Settings → Networking → Generate domain.
+5. Register `https://<domain>/api/paypal/webhook` as a webhook on the PayPal app and set `PAYPAL_WEBHOOK_ID`.
+
+Don't set `PAYTRACE_SIMULATED_WEBHOOK_SECRET` in production; simulated webhooks are rejected there anyway.
 
 ## Known limitations
 

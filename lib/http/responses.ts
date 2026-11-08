@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { InvestigationError } from "@/lib/ai/investigator";
+import { InvestigationError } from "@/lib/ai/analysis";
 import { PayPalApiError } from "@/lib/paypal/client";
 import { RecoveryActionError } from "@/lib/recovery/propose";
 

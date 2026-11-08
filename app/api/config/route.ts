@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { aiProviderName } from "@/lib/ai/providers";
 import { approverPasscode, demoToolsEnabled } from "@/lib/config";
 
 // read env at request time, not at build time
@@ -11,5 +12,6 @@ export function GET() {
     paypalClientId: process.env.PAYPAL_CLIENT_ID ?? null,
     demoTools: demoToolsEnabled(),
     passcodeRequired: approverPasscode() !== null,
+    aiProvider: aiProviderName(), // provider name only, never a key
   });
 }
