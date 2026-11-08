@@ -34,8 +34,9 @@ export interface Transaction {
 
 export type WebhookVerificationResult = "VERIFIED" | "SIMULATED_VERIFIED";
 
-// IGNORED = valid event but nothing to change, FAILED = will be retried
-export type WebhookProcessingStatus = "PROCESSED" | "IGNORED" | "FAILED";
+// PROCESSED = changed our record, CONFIRMED = matched what we already had,
+// IGNORED = late or not applicable, FAILED = will be retried
+export type WebhookProcessingStatus = "PROCESSED" | "CONFIRMED" | "IGNORED" | "FAILED";
 
 export interface WebhookEventRecord {
   eventId: string;

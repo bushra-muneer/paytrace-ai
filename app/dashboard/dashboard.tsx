@@ -420,7 +420,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <header className="sticky top-0 z-40 border-b border-zinc-200 bg-white/85 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/85">
-        <div className="mx-auto flex max-w-[1500px] flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
+        <div className="flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6 2xl:px-10">
           <div className="flex items-center gap-3">
             <Logo />
             <div>
@@ -466,7 +466,7 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <main className="mx-auto flex max-w-[1500px] flex-col gap-5 px-4 py-5 sm:px-6">
+      <main className="flex w-full flex-col gap-5 px-4 py-5 sm:px-6 2xl:px-10">
         <section className="grid grid-cols-2 gap-3 lg:grid-cols-5">
           <Kpi
             label="Open incidents"

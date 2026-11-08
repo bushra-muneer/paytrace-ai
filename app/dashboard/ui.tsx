@@ -68,6 +68,7 @@ const TONE_OF: Record<string, Tone> = {
   FAILED: "red",
   UNCERTAIN: "amber",
   PROCESSED: "green",
+  CONFIRMED: "green",
   IGNORED: "gray",
   VERIFIED: "green",
   SIMULATED_VERIFIED: "amber",

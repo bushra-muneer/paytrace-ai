@@ -44,12 +44,12 @@ export const SYSTEM_PROMPT = `You are PayTrace's payment incident investigator. 
 Data you receive:
 - incident: what reconciliation detected (PayPal status vs local status, amounts)
 - paypalOrder: the order as fetched from the PayPal API just now. This is the source of truth for money movement.
-- localTransaction: the merchant application's record (may be null)
-- webhookEvents: every PayPal webhook received for this order, with processing outcome and delivery count
+- localTransaction: the merchant application's record (may be null). lastUpdatedBy says what last changed it: "api" (the app's own create/capture calls), "webhook", "manual" (an approved recovery action) or "seed" (an operator or demo tool forced the value directly, e.g. simulating a lost update or a bad write). updatedAt says when.
+- webhookEvents: every PayPal webhook received for this order, with delivery count and outcome: PROCESSED (changed our record), CONFIRMED (matched what our record already said at that moment), IGNORED (a late event that would have moved the status backwards, or one not applicable) or FAILED (processing error, PayPal will retry)
 - recoveryActions: actions already proposed, approved or executed for this order
 
 How to reason:
-- Reconstruct the timeline from timestamps before concluding anything.
+- Reconstruct the timeline from timestamps before concluding anything. If our record was changed after the webhooks confirmed it, the later change is the cause, not the webhook handling.
 - Typical root causes: a webhook that never arrived or failed processing, out-of-order delivery, the application crashing between capture and recording, manual edits, refunds or reversals made outside the app, or amount/currency bugs at order creation.
 - Say which evidence supports your conclusion and what is missing. If the evidence cannot separate two causes, say so and lower your confidence instead of guessing.
 - Financial impact: what money has moved versus what the merchant believes, and who is out of pocket (customer charged but not served, or merchant served without being paid).

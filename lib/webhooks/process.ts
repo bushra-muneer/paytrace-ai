@@ -133,6 +133,11 @@ function applyToTransaction(
 
   if (eventTime && lastApplied && Date.parse(eventTime) < Date.parse(lastApplied)) {
     record.processingError = `Stale event: resource updated ${eventTime}, a newer update (${lastApplied}) was already applied`;
+  } else if (transaction.localStatus === nextStatus) {
+    // e.g. the capture API already recorded COMPLETED; the webhook confirms it
+    if (eventTime) transaction.lastEventUpdateTime = eventTime;
+    record.processingStatus = "CONFIRMED";
+    record.processingError = `Matches our record (${nextStatus})`;
   } else if (isForwardTransition(transaction.localStatus, nextStatus)) {
     transaction.localStatus = nextStatus;
     transaction.lastUpdatedBy = "webhook";
@@ -148,9 +153,7 @@ function applyToTransaction(
 }
 
 function staleReason(current: PaymentStatus, proposed: PaymentStatus): string {
-  return current === proposed
-    ? `Transaction already ${current}`
-    : `Out-of-order event: would move ${current} back to ${proposed}`;
+  return `Late event: order is already ${current}, so it isn't moved back to ${proposed}`;
 }
 
 function isPartialRefund(total: string, refunded: string): boolean {
