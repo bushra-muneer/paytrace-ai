@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { rejectWithoutPasscode } from "@/lib/http/approver";
 import { readDb } from "@/lib/storage/store";
 
 // GET /api/webhook-events?orderId=&includePayload=true
@@ -6,6 +7,11 @@ import { readDb } from "@/lib/storage/store";
 export async function GET(request: NextRequest) {
   const orderId = request.nextUrl.searchParams.get("orderId");
   const includePayload = request.nextUrl.searchParams.get("includePayload") === "true";
+  // raw payloads carry buyer details (name, email, address)
+  if (includePayload) {
+    const denied = rejectWithoutPasscode(request);
+    if (denied) return denied;
+  }
 
   const db = await readDb();
   const rows = Object.values(db.webhookEvents)

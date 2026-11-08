@@ -160,6 +160,22 @@ On Railway:
 
 Don't set `PAYTRACE_SIMULATED_WEBHOOK_SECRET` in production; simulated webhooks are rejected there anyway.
 
+## Security
+
+| Area | How it's handled |
+|---|---|
+| Webhooks | Every event is verified with PayPal's `verify-webhook-signature` API before anything is stored. Simulated events are rejected in production. |
+| Secrets | PayPal secret and AI keys live only in server environment variables. The browser only receives the PayPal client ID, which PayPal designs to be public. |
+| Actions | Approve, reject, execute, propose, staging, reconcile and AI runs all need `PAYTRACE_APPROVER_PASSCODE` when it's set. Passcodes are compared in constant time. |
+| Brute force | 10 wrong passcodes from one address lock it out for 15 minutes (HTTP 429). |
+| Buyer data | Raw PayPal orders and webhook payloads (buyer name, email, address) are only returned with the passcode. The public dashboard shows IDs, statuses and amounts. |
+| Money movement | Refunds need a second person, an explicit acknowledgement, a fresh PayPal check, and a stored idempotency key (see *Refund retries*). |
+| AI | The model only proposes. Webhook payloads in its input are treated as data, not instructions. |
+| Headers | `frame-ancestors 'none'` / `X-Frame-Options: DENY` (no clickjacking), `nosniff`, HSTS, a strict referrer policy and `Permissions-Policy`. `X-Powered-By` is removed. |
+| Dependencies | `npm audit` reports no known vulnerabilities (Next.js 16.4.5). |
+
+Note that incident evidence, including webhook payloads, is sent to the configured AI provider (OpenAI or Anthropic) when someone runs an investigation.
+
 ## Known limitations
 
 - JSON file storage, one instance. The storage module is the only thing to swap for PostgreSQL.

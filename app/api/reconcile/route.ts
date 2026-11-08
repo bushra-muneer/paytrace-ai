@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
+import { rejectWithoutPasscode } from "@/lib/http/approver";
 import { errorResponse, invalidJson, readJsonBody } from "@/lib/http/responses";
 import { reconcileAll, reconcileOrder } from "@/lib/reconciliation/reconcile";
 
 // { orderId } for one order, empty body for all of them
+// each run calls the PayPal API per order, so it's gated like other actions
 export async function POST(request: NextRequest) {
+  const denied = rejectWithoutPasscode(request);
+  if (denied) return denied;
+
   const body = await readJsonBody<{ orderId?: unknown }>(request);
   if (!body) return invalidJson();
 

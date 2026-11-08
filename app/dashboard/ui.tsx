@@ -62,17 +62,6 @@ const TAG_TONE: Record<Tone, string> = {
   ink: "bg-white text-zinc-800 shadow-[inset_0_0_0_1px_rgb(212_212_216)] dark:bg-transparent dark:text-zinc-200 dark:shadow-[inset_0_0_0_1px_rgb(82_82_91)]",
 };
 
-const SQUARE_TONE: Record<Tone, string> = {
-  red: "bg-red-500",
-  orange: "bg-orange-500",
-  amber: "bg-amber-500",
-  green: "bg-emerald-500",
-  blue: "bg-sky-500",
-  violet: "bg-violet-500",
-  gray: "bg-zinc-400 dark:bg-zinc-500",
-  ink: "bg-zinc-900 dark:bg-zinc-100",
-};
-
 const TONE_OF: Record<string, Tone> = {
   OPEN: "ink",
   RESOLVED: "green",
@@ -110,13 +99,132 @@ export function Tag({ value, tone, children }: { value?: string | null; tone?: T
   );
 }
 
-// Payment/processing state: small square plus plain text, quieter than a tag.
+// Payment and processing states: a distinct icon shape per state (readable without colour),
+// coloured by meaning, with neutral text. Same idea as Linear's or GitHub's status icons.
+type StatusGlyph =
+  | "notStarted"
+  | "inProgress"
+  | "waiting"
+  | "done"
+  | "doubleDone"
+  | "failed"
+  | "returned"
+  | "voided"
+  | "skipped"
+  | "shield"
+  | "unknown";
+
+const STATUS_GLYPH: Record<string, StatusGlyph> = {
+  CREATED: "notStarted",
+  APPROVED: "inProgress",
+  PENDING: "waiting",
+  COMPLETED: "done",
+  DECLINED: "failed",
+  REFUNDED: "returned",
+  PARTIALLY_REFUNDED: "returned",
+  REVERSED: "returned",
+  VOIDED: "voided",
+  PROCESSED: "done",
+  CONFIRMED: "doubleDone",
+  IGNORED: "skipped",
+  FAILED: "failed",
+  VERIFIED: "shield",
+  SIMULATED_VERIFIED: "shield",
+  UNKNOWN: "unknown",
+};
+
+const GLYPH_TONE: Record<Tone, string> = {
+  red: "text-red-600 dark:text-red-400",
+  orange: "text-orange-500",
+  amber: "text-amber-500",
+  green: "text-emerald-600 dark:text-emerald-400",
+  blue: "text-sky-600 dark:text-sky-400",
+  violet: "text-violet-600 dark:text-violet-400",
+  gray: "text-zinc-400 dark:text-zinc-500",
+  ink: "text-zinc-900 dark:text-zinc-100",
+};
+
+function StatusIcon({ glyph }: { glyph: StatusGlyph }) {
+  const common = { fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  switch (glyph) {
+    case "notStarted":
+      return <circle cx="8" cy="8" r="5.5" {...common} strokeDasharray="2.2 2" />;
+    case "inProgress":
+      return (
+        <>
+          <circle cx="8" cy="8" r="5.5" {...common} />
+          <path d="M8 4.25a3.75 3.75 0 0 1 0 7.5z" fill="currentColor" />
+        </>
+      );
+    case "waiting":
+      return (
+        <>
+          <circle cx="8" cy="8" r="5.5" {...common} />
+          <path d="M8 5.25V8l1.75 1.25" {...common} />
+        </>
+      );
+    case "done":
+      return (
+        <>
+          <circle cx="8" cy="8" r="6.25" fill="currentColor" />
+          <path d="M5.4 8.2l1.75 1.75L10.6 6.5" fill="none" stroke="white" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+        </>
+      );
+    case "doubleDone":
+      return (
+        <>
+          <path d="M1.75 8.4l2.4 2.35L9.5 5.25" {...common} />
+          <path d="M7.4 10.1l.65.65 5.4-5.5" {...common} />
+        </>
+      );
+    case "failed":
+      return (
+        <>
+          <circle cx="8" cy="8" r="6.25" fill="currentColor" />
+          <path d="M5.9 5.9l4.2 4.2M10.1 5.9l-4.2 4.2" fill="none" stroke="white" strokeWidth={1.6} strokeLinecap="round" />
+        </>
+      );
+    case "returned":
+      return <path d="M6 3.75L3.25 6.5 6 9.25M3.25 6.5h6.25a3 3 0 0 1 0 6H7.5" {...common} />;
+    case "voided":
+      return (
+        <>
+          <circle cx="8" cy="8" r="5.5" {...common} />
+          <path d="M4.2 11.8l7.6-7.6" {...common} />
+        </>
+      );
+    case "skipped":
+      return (
+        <>
+          <circle cx="8" cy="8" r="5.5" {...common} />
+          <path d="M5.5 8h5" {...common} />
+        </>
+      );
+    case "shield":
+      return (
+        <>
+          <path d="M8 1.75l5 2v4c0 3.1-2.1 5.6-5 6.5-2.9-.9-5-3.4-5-6.5v-4z" {...common} />
+          <path d="M5.75 8l1.6 1.6L10.4 6.5" {...common} />
+        </>
+      );
+    case "unknown":
+      return (
+        <>
+          <circle cx="8" cy="8" r="5.5" {...common} />
+          <path d="M6.6 6.4a1.45 1.45 0 0 1 2.8.5c0 1-1.4 1.2-1.4 2.1M8 10.9v.1" {...common} />
+        </>
+      );
+  }
+}
+
 export function Status({ value }: { value: string | null | undefined }) {
   if (!value) return <span className="text-zinc-400">-</span>;
-  const t = TONE_OF[value] ?? "gray";
+  const tone = TONE_OF[value] ?? "gray";
   return (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-[13px] text-zinc-700 dark:text-zinc-300">
-      <span className={`size-[7px] rounded-[1.5px] ${SQUARE_TONE[t]}`} />
+      <svg viewBox="0 0 16 16" className={`size-3.5 shrink-0 ${GLYPH_TONE[tone]}`} aria-hidden="true">
+        <StatusIcon glyph={STATUS_GLYPH[value] ?? "unknown"} />
+      </svg>
       {label(value)}
     </span>
   );

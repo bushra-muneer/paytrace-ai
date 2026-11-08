@@ -85,6 +85,60 @@ const transactionRowStyle = (p: RowClassParams<Transaction>) =>
 
 const CURRENCIES = ["EUR", "USD", "GBP"];
 
+// Status views: quick filters above each grid. The first entry of each list is the default.
+interface StatusView<T> {
+  key: string;
+  label: string;
+  match: (row: T) => boolean;
+  attention?: boolean; // highlight the count when it isn't zero
+}
+
+const INCIDENT_VIEWS: StatusView<Incident>[] = [
+  { key: "open", label: "Open", match: (i) => i.status === "OPEN", attention: true },
+  { key: "resolved", label: "Resolved", match: (i) => i.status === "RESOLVED" },
+  { key: "all", label: "All", match: () => true },
+];
+
+const TRANSACTION_VIEWS: StatusView<Transaction>[] = [
+  { key: "all", label: "All", match: () => true },
+  { key: "mismatch", label: "Mismatch", match: (t) => reconciliationState(t) === "MISMATCH", attention: true },
+  { key: "in-sync", label: "In sync", match: (t) => reconciliationState(t) === "IN SYNC" },
+  { key: "unchecked", label: "Not checked", match: (t) => reconciliationState(t) === "NOT CHECKED" },
+];
+
+const EVENT_VIEWS: StatusView<EventRow>[] = [
+  { key: "all", label: "All", match: () => true },
+  { key: "processed", label: "Changed state", match: (e) => e.processingStatus === "PROCESSED" },
+  { key: "confirmed", label: "Confirmed", match: (e) => e.processingStatus === "CONFIRMED" },
+  { key: "ignored", label: "Ignored", match: (e) => e.processingStatus === "IGNORED" },
+  { key: "failed", label: "Failed", match: (e) => e.processingStatus === "FAILED", attention: true },
+];
+
+const ACTION_VIEWS: StatusView<RecoveryAction>[] = [
+  { key: "all", label: "All", match: () => true },
+  { key: "proposed", label: "Awaiting approval", match: (a) => a.status === "PROPOSED" },
+  { key: "approved", label: "Approved", match: (a) => a.status === "APPROVED" },
+  { key: "attention", label: "Needs attention", match: (a) => a.status === "FAILED" || a.status === "UNCERTAIN", attention: true },
+  { key: "executed", label: "Executed", match: (a) => a.status === "EXECUTED" },
+  { key: "rejected", label: "Rejected", match: (a) => a.status === "REJECTED" },
+];
+
+const DEFAULT_VIEWS: Record<Tab, string> = {
+  incidents: INCIDENT_VIEWS[0].key,
+  transactions: TRANSACTION_VIEWS[0].key,
+  events: EVENT_VIEWS[0].key,
+  actions: ACTION_VIEWS[0].key,
+};
+
+function applyView<T>(rows: T[], views: StatusView<T>[], key: string): T[] {
+  const view = views.find((v) => v.key === key) ?? views[0];
+  return rows.filter(view.match);
+}
+
+function countViews<T>(rows: T[], views: StatusView<T>[]) {
+  return views.map((v) => ({ key: v.key, label: v.label, attention: v.attention, count: rows.filter(v.match).length }));
+}
+
 interface ActivityItem {
   key: string;
   at: string;
@@ -249,6 +303,11 @@ export default function Dashboard() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [passcode, setPasscodeInput] = useState("");
   const [search, setSearch] = useState("");
+  const [views, setViews] = useState<Record<Tab, string>>(DEFAULT_VIEWS);
+  const showView = (target: Tab, key: string) => {
+    setTab(target);
+    setViews((v) => ({ ...v, [target]: key }));
+  };
   const secondsSinceRefresh = useSecondsSince(lastRefreshAt);
 
   useEffect(() => {
@@ -336,6 +395,25 @@ export default function Dashboard() {
   const verifiedEvents = events.filter((e) => e.verification === "VERIFIED").length;
   const loaded = lastRefreshAt !== null;
 
+  const shownIncidents = useMemo(() => applyView(incidents, INCIDENT_VIEWS, views.incidents), [incidents, views.incidents]);
+  const shownTransactions = useMemo(() => applyView(transactions, TRANSACTION_VIEWS, views.transactions), [transactions, views.transactions]);
+  const shownEvents = useMemo(() => applyView(events, EVENT_VIEWS, views.events), [events, views.events]);
+  const shownActions = useMemo(() => applyView(actions, ACTION_VIEWS, views.actions), [actions, views.actions]);
+
+  const viewChips = useMemo(() => {
+    switch (tab) {
+      case "incidents":
+        return countViews(incidents, INCIDENT_VIEWS);
+      case "transactions":
+        return countViews(transactions, TRANSACTION_VIEWS);
+      case "events":
+        return countViews(events, EVENT_VIEWS);
+      case "actions":
+        return countViews(actions, ACTION_VIEWS);
+    }
+  }, [tab, incidents, transactions, events, actions]);
+  const totalRows = { incidents: incidents.length, transactions: transactions.length, events: events.length, actions: actions.length }[tab];
+
   const activity = useMemo(() => {
     const items: ActivityItem[] = [];
     for (const i of incidents) {
@@ -385,24 +463,25 @@ export default function Dashboard() {
         sort: "desc",
       },
       { field: "type", flex: 1.4, minWidth: 140, cellClass: "font-medium", valueFormatter: (p) => (p.value ? humanize(p.value) : "") },
-      { field: "paypalStatus", headerName: "PayPal", cellRenderer: statusCell, flex: 1, minWidth: 105 },
-      { field: "localStatus", headerName: "Local", cellRenderer: statusCell, flex: 1, minWidth: 105 },
+      { field: "paypalStatus", headerName: "PayPal", cellRenderer: statusCell, flex: 1, minWidth: 118 },
+      { field: "localStatus", headerName: "Local", cellRenderer: statusCell, flex: 1, minWidth: 118 },
       { ...moneyColumn<Incident>("At risk", (i) => i.financialImpact), flex: 1, minWidth: 100 },
       {
         headerName: "AI analysis",
         valueGetter: (p) => p.data?.aiAnalysis?.confidence ?? null,
         cellRenderer: (p: { value: "LOW" | "MEDIUM" | "HIGH" | null }) =>
           p.value ? <ConfidenceMeter level={p.value} /> : <span className="text-[13px] text-zinc-400">Not run</span>,
-        flex: 1.3, minWidth: 140,
+        flex: 1.3, minWidth: 152,
       },
       {
-        headerName: "Approvals",
+        headerName: "Queue",
+        headerTooltip: "Recovery actions waiting for approval",
         valueGetter: (p) => (p.data ? awaitingApproval[p.data.id] ?? 0 : 0),
         cellRenderer: (p: { value: number }) => (p.value ? <Tag tone="blue">{p.value} pending</Tag> : <span className="text-zinc-400">-</span>),
         filter: "agNumberColumnFilter",
-        flex: 1, minWidth: 100,
+        flex: 0.8, minWidth: 100,
       },
-      { field: "orderId", headerName: "Order", cellRenderer: monoCell, flex: 1.3, minWidth: 150 },
+      { field: "orderId", headerName: "Order", cellRenderer: monoCell, flex: 1.3, minWidth: 168 },
       { field: "lastSeenAt", headerName: "Last seen", valueFormatter: (p) => shortTime(p.value), flex: 1.1, minWidth: 150 },
     ],
     [awaitingApproval]
@@ -436,7 +515,7 @@ export default function Dashboard() {
       { field: "verification", cellRenderer: statusCell, width: 190 },
       { field: "orderId", cellRenderer: monoCell, width: 190 },
       { field: "captureId", cellRenderer: monoCell, width: 190 },
-      { field: "resourceStatus", headerName: "Resource status", width: 140 },
+      { field: "resourceStatus", headerName: "Resource status", cellRenderer: statusCell, width: 150 },
       moneyColumn<EventRow>("Amount", (e) => e.amount),
       { field: "deliveryCount", headerName: "Deliveries", filter: "agNumberColumnFilter", type: "rightAligned", width: 120 },
       { field: "processingError", headerName: "Note", flex: 1, minWidth: 200 },
@@ -477,7 +556,7 @@ export default function Dashboard() {
       theme,
       defaultColDef,
       quickFilterText: search,
-      overlayNoRowsTemplate: overlay(EMPTY[tab]),
+      overlayNoRowsTemplate: overlay(totalRows === 0 ? EMPTY[tab] : "Nothing matches this view. Pick another status above."),
       domLayout: "autoHeight" as const,
       pagination: true,
       paginationPageSize: 10,
@@ -490,7 +569,7 @@ export default function Dashboard() {
         return (
           <AgGridReact<Incident>
             {...shared}
-            rowData={incidents}
+            rowData={shownIncidents}
             columnDefs={incidentCols}
             getRowId={(p) => p.data.id}
             getRowStyle={incidentRowStyle}
@@ -501,7 +580,7 @@ export default function Dashboard() {
         return (
           <AgGridReact<Transaction>
             {...shared}
-            rowData={transactions}
+            rowData={shownTransactions}
             columnDefs={transactionCols}
             getRowId={(p) => p.data.orderId}
             getRowStyle={transactionRowStyle}
@@ -509,12 +588,12 @@ export default function Dashboard() {
           />
         );
       case "events":
-        return <AgGridReact<EventRow> {...shared} rowData={events} columnDefs={eventCols} getRowId={(p) => p.data.eventId} />;
+        return <AgGridReact<EventRow> {...shared} rowData={shownEvents} columnDefs={eventCols} getRowId={(p) => p.data.eventId} />;
       case "actions":
         return (
           <AgGridReact<RecoveryAction>
             {...shared}
-            rowData={actions}
+            rowData={shownActions}
             columnDefs={actionCols}
             getRowId={(p) => p.data.id}
             onRowClicked={(e: RowClickedEvent<RecoveryAction>) => e.data && setSelectedIncident(e.data.incidentId)}
@@ -655,7 +734,7 @@ export default function Dashboard() {
               value={openIncidents.length}
               sub={criticalOpen ? `${criticalOpen} critical` : "None critical"}
               alert={openIncidents.length > 0}
-              onClick={() => setTab("incidents")}
+              onClick={() => showView("incidents", "open")}
             />
             <Stat
               loading={!loaded}
@@ -664,7 +743,7 @@ export default function Dashboard() {
               sub={atRisk.length > 1 ? `+ ${atRisk.slice(1).map(([c, v]) => formatAmount(c, v)).join(", ")}` : "Across open incidents"}
               alert={atRisk.length > 0}
             />
-            <Stat loading={!loaded} label="Awaiting approval" value={pendingApproval} sub="Proposed recovery actions" onClick={() => setTab("actions")} />
+            <Stat loading={!loaded} label="Awaiting approval" value={pendingApproval} sub="Proposed recovery actions" onClick={() => showView("actions", "proposed")} />
             <Stat
               loading={!loaded}
               label="In sync with PayPal"
@@ -672,7 +751,7 @@ export default function Dashboard() {
               sub={mismatched ? `${mismatched} out of sync` : checked.length ? "All orders match" : "Not reconciled yet"}
               alert={mismatched > 0}
               meter={checked.length ? { ratio: (checked.length - mismatched) / checked.length, tone: mismatched ? "red" : "green" } : undefined}
-              onClick={() => setTab("transactions")}
+              onClick={() => showView("transactions", mismatched ? "mismatch" : "all")}
             />
             <Stat
               loading={!loaded}
@@ -680,7 +759,7 @@ export default function Dashboard() {
               value={events.length}
               sub={`${failedEvents} failed, ${duplicateDeliveries} duplicates absorbed`}
               meter={events.length ? { ratio: verifiedEvents / events.length, tone: "green" } : undefined}
-              onClick={() => setTab("events")}
+              onClick={() => showView("events", failedEvents ? "failed" : "all")}
             />
           </section>
 
@@ -690,24 +769,52 @@ export default function Dashboard() {
                 <h1 className="text-[17px] font-semibold tracking-tight">{section.title}</h1>
                 <p className="mt-0.5 text-[13px] text-zinc-500">{section.description}</p>
               </div>
-              <div className="flex items-center gap-2">
-                <label className="relative">
-                  <Icon name="search" className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-zinc-400" />
-                  <input
-                    type="search"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Filter by order, capture or event"
-                    aria-label="Filter rows"
-                    className={`${input} w-64 pl-8`}
-                  />
-                </label>
-                {tab === "transactions" && (
-                  <button onClick={() => setCheckoutOpen(true)} className={button.secondary}>
-                    <Icon name="plus" className="size-3.5" /> Test payment
-                  </button>
-                )}
+              {tab === "transactions" && (
+                <button onClick={() => setCheckoutOpen(true)} className={button.secondary}>
+                  <Icon name="plus" className="size-3.5" /> Test payment
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-1" role="tablist" aria-label="Filter by status">
+                {viewChips.map((chip) => {
+                  const active = views[tab] === chip.key;
+                  return (
+                    <button
+                      key={chip.key}
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setViews((v) => ({ ...v, [tab]: chip.key }))}
+                      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[13px] transition-colors ${
+                        active
+                          ? "bg-zinc-900 font-medium text-white dark:bg-zinc-100 dark:text-zinc-900"
+                          : "text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                      }`}
+                    >
+                      {chip.label}
+                      <span
+                        className={`text-xs tabular-nums ${
+                          active ? "opacity-70" : chip.attention && chip.count > 0 ? "font-semibold text-red-600 dark:text-red-400" : "text-zinc-400"
+                        }`}
+                      >
+                        {chip.count}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
+              <label className="relative">
+                <Icon name="search" className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-zinc-400" />
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Filter by order, capture or event"
+                  aria-label="Filter rows"
+                  className={`${input} w-64 pl-8`}
+                />
+              </label>
             </div>
 
             <nav className="flex gap-1 overflow-x-auto lg:hidden" aria-label="Sections">
@@ -730,7 +837,7 @@ export default function Dashboard() {
                 <div key={tab}>{grid}</div>
               </div>
 
-              <aside className="hidden w-80 shrink-0 2xl:block" aria-label="Recent activity">
+              <aside className="hidden w-72 shrink-0 2xl:block" aria-label="Recent activity">
                 <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
                   <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
                     <h2 className="text-[13px] font-semibold">Activity</h2>
