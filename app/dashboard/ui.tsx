@@ -3,7 +3,23 @@
 import { useEffect, type ReactNode } from "react";
 import type { Money } from "@/lib/domain/types";
 
-export const money = (m: Money | null | undefined) => (m ? `${m.currency} ${m.value}` : "-");
+// $350.00, EUR 49.90 -> €49.90; falls back to "EUR 49.90" for codes the browser doesn't know
+export function formatAmount(currency: string, value: number | string): string {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(value));
+  } catch {
+    return `${currency} ${value}`;
+  }
+}
+export const money = (m: Money | null | undefined) => (m ? formatAmount(m.currency, m.value) : "-");
+
+export function relativeTime(iso: string, now = Date.now()): string {
+  const seconds = Math.round((now - Date.parse(iso)) / 1000);
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
+}
 export const time = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString() : "-");
 // compact form for grid cells, e.g. "Nov 3, 01:38"
 export const shortTime = (iso: string | null | undefined) =>
@@ -146,38 +162,88 @@ export function Reconciliation({ value }: { value: string | null | undefined }) 
   return <span className="text-[13px] text-zinc-400">Not checked</span>;
 }
 
-export function Kpi({
+// One cell of the stats strip. The strip draws hairline dividers via gap-px on a tinted background.
+export function Stat({
   label: title,
   value,
   sub,
   alert,
+  meter,
   onClick,
+  loading,
 }: {
   label: string;
   value: ReactNode;
   sub?: ReactNode;
   alert?: boolean;
+  meter?: { ratio: number; tone: "green" | "red" };
   onClick?: () => void;
+  loading?: boolean;
 }) {
+  if (loading) {
+    return (
+      <div className="bg-white px-4 py-3.5 dark:bg-zinc-900" aria-busy="true">
+        <div className="text-xs font-medium text-zinc-500">{title}</div>
+        <div className="mt-2.5 h-5 w-16 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
+        <div className="mt-2.5 h-3 w-28 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
+      </div>
+    );
+  }
   const body = (
     <>
-      <div className="flex items-center justify-between text-[13px] text-zinc-500">
-        {title}
-        {alert && <span className="size-1.5 rounded-full bg-red-500" />}
-      </div>
-      <div className={`mt-2 text-[26px] font-semibold leading-none tabular-nums tracking-tight ${alert ? "text-red-600 dark:text-red-400" : ""}`}>
+      <div className="text-xs font-medium text-zinc-500">{title}</div>
+      <div className={`mt-1.5 text-[22px] font-semibold leading-tight tabular-nums tracking-tight ${alert ? "text-red-600 dark:text-red-400" : ""}`}>
         {value}
       </div>
-      {sub && <div className="mt-2 text-xs text-zinc-500">{sub}</div>}
+      {meter && (
+        <div className="mt-2 h-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+          <div
+            className={`h-full rounded-full ${meter.tone === "green" ? "bg-emerald-500" : "bg-red-500"}`}
+            style={{ width: `${Math.round(Math.min(1, Math.max(0, meter.ratio)) * 100)}%` }}
+          />
+        </div>
+      )}
+      {sub && <div className="mt-1.5 truncate text-xs text-zinc-500">{sub}</div>}
     </>
   );
-  const cls = "flex flex-col justify-start rounded-lg border border-zinc-200 bg-white px-4 py-3.5 text-left dark:border-zinc-800 dark:bg-zinc-900";
+  const cls = "flex flex-col justify-start bg-white px-4 py-3.5 text-left dark:bg-zinc-900";
   return onClick ? (
-    <button onClick={onClick} className={`${cls} transition-colors hover:border-zinc-400 dark:hover:border-zinc-600`}>
+    <button onClick={onClick} className={`${cls} transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/60`}>
       {body}
     </button>
   ) : (
     <div className={cls}>{body}</div>
+  );
+}
+
+export function Modal({ title, description, onClose, children }: { title: string; description?: string; onClose: () => void; children: ReactNode }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="animate-fade-in fixed inset-0 z-50 flex items-start justify-center bg-zinc-950/30 px-4 pt-[12vh]" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="w-full max-w-md rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-900"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
+          <div>
+            <h2 className="text-[15px] font-semibold">{title}</h2>
+            {description && <p className="mt-0.5 text-xs text-zinc-500">{description}</p>}
+          </div>
+          <button onClick={onClose} aria-label="Close" className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">
+            <Icon name="close" />
+          </button>
+        </div>
+        <div className="p-5">{children}</div>
+      </div>
+    </div>
   );
 }
 
@@ -336,6 +402,23 @@ const PATHS = {
   refresh: <path d="M20 11a8 8 0 0 0-14.6-4.5M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5M20 20v-4h-4" />,
   shield: <path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z" />,
   arrow: <path d="M9 6l6 6-6 6" />,
+  incidents: <path d="M12 4.5L21 19.5H3zM12 10v4M12 16.8v.2" />,
+  transactions: <path d="M5 4h14v16l-2.5-1.5L14 20l-2-1.5L10 20l-2.5-1.5L5 20zM9 9h6M9 13h6" />,
+  events: <path d="M4 12h3l2.5-6 5 12 2.5-6h3" />,
+  actions: <path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6zM9 12l2 2 4-4" />,
+  plus: <path d="M12 5v14M5 12h14" />,
+  user: (
+    <>
+      <circle cx="12" cy="8" r="3.5" />
+      <path d="M5 20c1-3.5 3.8-5.5 7-5.5s6 2 7 5.5" />
+    </>
+  ),
+  lock: (
+    <>
+      <rect x="5" y="10.5" width="14" height="10" rx="1.5" />
+      <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
+    </>
+  ),
   sun: (
     <>
       <circle cx="12" cy="12" r="4" />

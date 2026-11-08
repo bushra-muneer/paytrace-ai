@@ -16,9 +16,32 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import type { Incident, Money, RecoveryAction, Transaction } from "@/lib/domain/types";
 import { api, setPasscode, type AppConfig, type EventRow } from "./api";
 import PayPalCheckout from "./checkout";
-import { EventTimeline, IncidentPanel } from "./incident-panel";
-import { proposerLabel } from "./incident-panel";
-import { button, Card, ConfidenceMeter, Drawer, humanize, Icon, input, Kpi, Logo, money, Reconciliation, Severity, shortTime, Status, Tag, ThemeToggle, Toast, type Notice, type ThemePreference } from "./ui";
+import { IdentityMenu } from "./identity-menu";
+import { EventTimeline, IncidentPanel, proposerLabel } from "./incident-panel";
+import {
+  button,
+  Card,
+  ConfidenceMeter,
+  Drawer,
+  formatAmount,
+  humanize,
+  Icon,
+  input,
+  Logo,
+  Modal,
+  money,
+  Reconciliation,
+  relativeTime,
+  Severity,
+  shortTime,
+  Stat,
+  Status,
+  Tag,
+  ThemeToggle,
+  Toast,
+  type Notice,
+  type ThemePreference,
+} from "./ui";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -62,9 +85,47 @@ const transactionRowStyle = (p: RowClassParams<Transaction>) =>
 
 const CURRENCIES = ["EUR", "USD", "GBP"];
 
+interface ActivityItem {
+  key: string;
+  at: string;
+  title: string;
+  detail: string;
+  tone: "red" | "green" | "blue" | "gray";
+  incidentId?: string;
+}
+
+const ACTIVITY_DOT: Record<ActivityItem["tone"], string> = {
+  red: "bg-red-500",
+  green: "bg-emerald-500",
+  blue: "bg-sky-500",
+  gray: "bg-zinc-300 dark:bg-zinc-600",
+};
+
+const ACTION_NAME: Record<RecoveryAction["type"], string> = {
+  SYNC_LOCAL_STATUS: "Status sync",
+  CREATE_LOCAL_RECORD: "Record creation",
+  REFUND_CAPTURE: "Refund",
+};
+
+// audit events worth surfacing, and how they read in the feed
+const ACTIVITY_EVENTS: Record<string, [string, ActivityItem["tone"]]> = {
+  APPROVED: ["approved", "blue"],
+  EXECUTED: ["executed", "green"],
+  REJECTED: ["rejected", "gray"],
+  FAILED: ["failed", "red"],
+  UNCERTAIN: ["outcome unknown", "red"],
+};
+
+const SECTIONS: Record<Tab, { title: string; description: string }> = {
+  incidents: { title: "Incidents", description: "Where PayPal and our records disagree. Open and most severe first." },
+  transactions: { title: "Transactions", description: "Every PayPal order we know about, and whether it still matches PayPal." },
+  events: { title: "Webhook events", description: "Notifications from PayPal, signature-checked and de-duplicated by event ID." },
+  actions: { title: "Recovery actions", description: "Fixes proposed by reconciliation, the AI or a person, and who approved them." },
+};
+
 const EMPTY: Record<Tab, string> = {
-  incidents: "No incidents. Pay with the test checkout, then use Reconcile all.",
-  transactions: "No transactions yet. Use the PayPal button above to make a sandbox payment.",
+  incidents: "No open problems. Everything we know about matches PayPal.",
+  transactions: "No transactions yet. Use New test payment to make a sandbox payment.",
   events: "No webhook events yet. Register the webhook URL on your PayPal app to receive them.",
   actions: "No recovery actions yet. They appear when an incident is detected or investigated.",
 };
@@ -150,9 +211,15 @@ export default function Dashboard() {
         accentColor: dark ? "#a1a1aa" : "#18181b",
         fontFamily: "inherit",
         fontSize: 13,
-        headerFontWeight: 600,
-        rowHeight: 42,
-        headerHeight: 40,
+        headerFontSize: 12,
+        headerFontWeight: 500,
+        rowHeight: 44,
+        headerHeight: 38,
+        cellHorizontalPadding: 16,
+        iconSize: 14,
+        columnBorder: false,
+        headerColumnBorder: false,
+        headerColumnResizeHandleColor: "transparent",
         wrapperBorder: false,
         wrapperBorderRadius: 0,
         rowHoverColor: dark ? "rgba(255, 255, 255, 0.04)" : "rgba(0, 0, 0, 0.025)",
@@ -176,6 +243,7 @@ export default function Dashboard() {
   const [actor, setActor] = useActorName();
   const [newOrder, setNewOrder] = useState({ amount: "10.00", currency: "EUR" });
   const [approveUrl, setApproveUrl] = useState<string | null>(null);
+  const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [refreshCount, setRefreshCount] = useState(0);
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -187,10 +255,29 @@ export default function Dashboard() {
     api.config().then(setConfig).catch(() => setConfig(null));
   }, []);
 
+  // kept per browser tab, so a refresh while recording doesn't clear it
   const updatePasscode = (value: string) => {
     setPasscodeInput(value);
     setPasscode(value);
+    try {
+      sessionStorage.setItem("paytrace.passcode", value);
+    } catch {
+      /* storage unavailable */
+    }
   };
+
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem("paytrace.passcode");
+      if (saved) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time restore from storage
+        setPasscodeInput(saved);
+        setPasscode(saved);
+      }
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -246,6 +333,33 @@ export default function Dashboard() {
   const mismatched = transactions.filter((t) => reconciliationState(t) === "MISMATCH").length;
   const pendingApproval = actions.filter((a) => a.status === "PROPOSED").length;
   const failedEvents = events.filter((e) => e.processingStatus === "FAILED").length;
+  const verifiedEvents = events.filter((e) => e.verification === "VERIFIED").length;
+  const loaded = lastRefreshAt !== null;
+
+  const activity = useMemo(() => {
+    const items: ActivityItem[] = [];
+    for (const i of incidents) {
+      items.push({ key: `d-${i.id}`, at: i.detectedAt, title: `${humanize(i.type)} detected`, detail: `${humanize(i.severity)} severity, order ${i.orderId}`, tone: "red", incidentId: i.id });
+      if (i.aiAnalysis) {
+        items.push({ key: `ai-${i.id}`, at: i.aiAnalysis.generatedAt, title: "AI investigation completed", detail: `${humanize(i.aiAnalysis.confidence)} confidence, order ${i.orderId}`, tone: "blue", incidentId: i.id });
+      }
+      if (i.resolvedAt) {
+        items.push({ key: `r-${i.id}`, at: i.resolvedAt, title: "Incident resolved", detail: `Order ${i.orderId}`, tone: "green", incidentId: i.id });
+      }
+    }
+    for (const a of actions) {
+      a.audit.forEach((entry, n) => {
+        const shown = ACTIVITY_EVENTS[entry.event];
+        if (!shown) return;
+        items.push({ key: `a-${a.id}-${n}`, at: entry.at, title: `${ACTION_NAME[a.type]} ${shown[0]}`, detail: `by ${proposerLabel(entry.actor)}, order ${a.orderId}`, tone: shown[1], incidentId: a.incidentId });
+      });
+    }
+    for (const e of events) {
+      if (e.verification !== "VERIFIED") continue;
+      items.push({ key: `w-${e.eventId}`, at: e.firstReceivedAt, title: "PayPal webhook verified", detail: e.eventType, tone: "gray" });
+    }
+    return items.sort((x, y) => y.at.localeCompare(x.at)).slice(0, 12);
+  }, [incidents, actions, events]);
   const duplicateDeliveries = events.reduce((n, e) => n + Math.max(0, e.deliveryCount - 1), 0);
 
   const awaitingApproval = useMemo(() => {
@@ -257,39 +371,39 @@ export default function Dashboard() {
   // open first, then worst first, then most recent
   const incidentCols = useMemo<ColDef<Incident>[]>(
     () => [
-      { field: "status", cellRenderer: tagCell, width: 110, pinned: "left" },
+      { field: "status", cellRenderer: tagCell, width: 100, pinned: "left" },
       {
         field: "severity",
         cellRenderer: severityCell,
-        width: 155,
+        width: 135,
         pinned: "left",
-        // one sort key: open incidents first, then by severity
+        // one sort key: open first, then severity, then most recent
         comparator: (a: string, b: string, nodeA, nodeB) =>
           (nodeA.data?.status === "OPEN" ? 10 : 0) + (SEVERITY_RANK[a] ?? 0) -
-          ((nodeB.data?.status === "OPEN" ? 10 : 0) + (SEVERITY_RANK[b] ?? 0)),
+            ((nodeB.data?.status === "OPEN" ? 10 : 0) + (SEVERITY_RANK[b] ?? 0)) ||
+          (nodeA.data?.lastSeenAt ?? "").localeCompare(nodeB.data?.lastSeenAt ?? ""),
         sort: "desc",
-        sortIndex: 0,
       },
-      { field: "type", flex: 1, minWidth: 150, cellClass: "font-medium", valueFormatter: (p) => (p.value ? humanize(p.value) : "") },
-      { field: "paypalStatus", headerName: "PayPal", cellRenderer: statusCell, width: 120 },
-      { field: "localStatus", headerName: "Local", cellRenderer: statusCell, width: 120 },
-      { ...moneyColumn<Incident>("At risk", (i) => i.financialImpact), width: 115 },
+      { field: "type", flex: 1.4, minWidth: 140, cellClass: "font-medium", valueFormatter: (p) => (p.value ? humanize(p.value) : "") },
+      { field: "paypalStatus", headerName: "PayPal", cellRenderer: statusCell, flex: 1, minWidth: 105 },
+      { field: "localStatus", headerName: "Local", cellRenderer: statusCell, flex: 1, minWidth: 105 },
+      { ...moneyColumn<Incident>("At risk", (i) => i.financialImpact), flex: 1, minWidth: 100 },
       {
         headerName: "AI analysis",
         valueGetter: (p) => p.data?.aiAnalysis?.confidence ?? null,
         cellRenderer: (p: { value: "LOW" | "MEDIUM" | "HIGH" | null }) =>
           p.value ? <ConfidenceMeter level={p.value} /> : <span className="text-[13px] text-zinc-400">Not run</span>,
-        width: 155,
+        flex: 1.3, minWidth: 140,
       },
       {
         headerName: "Approvals",
         valueGetter: (p) => (p.data ? awaitingApproval[p.data.id] ?? 0 : 0),
         cellRenderer: (p: { value: number }) => (p.value ? <Tag tone="blue">{p.value} pending</Tag> : <span className="text-zinc-400">-</span>),
         filter: "agNumberColumnFilter",
-        width: 115,
+        flex: 1, minWidth: 100,
       },
-      { field: "orderId", headerName: "Order", cellRenderer: monoCell, width: 170 },
-      { field: "lastSeenAt", headerName: "Last seen", valueFormatter: (p) => shortTime(p.value), width: 160, sort: "desc", sortIndex: 1 },
+      { field: "orderId", headerName: "Order", cellRenderer: monoCell, flex: 1.3, minWidth: 150 },
+      { field: "lastSeenAt", headerName: "Last seen", valueFormatter: (p) => shortTime(p.value), flex: 1.1, minWidth: 150 },
     ],
     [awaitingApproval]
   );
@@ -300,17 +414,17 @@ export default function Dashboard() {
         headerName: "Reconciliation",
         valueGetter: (p) => (p.data ? reconciliationState(p.data) : null),
         cellRenderer: reconciliationCell,
-        width: 150,
+        width: 130,
         pinned: "left",
       },
-      { field: "orderId", cellRenderer: monoCell, width: 190, pinned: "left" },
-      { field: "localStatus", headerName: "Local", cellRenderer: statusCell, width: 160 },
-      { field: "paypalStatus", headerName: "PayPal (last seen)", cellRenderer: statusCell, width: 170 },
-      moneyColumn<Transaction>("Amount", (t) => t.amount),
-      { field: "captureId", cellRenderer: monoCell, width: 190 },
-      { field: "lastUpdatedBy", headerName: "Updated by", width: 120 },
-      { field: "lastReconciledAt", headerName: "Reconciled", valueFormatter: (p) => shortTime(p.value), width: 140 },
-      { field: "updatedAt", headerName: "Updated", valueFormatter: (p) => shortTime(p.value), flex: 1, minWidth: 140, sort: "desc" },
+      { field: "orderId", cellRenderer: monoCell, width: 175, pinned: "left" },
+      { field: "localStatus", headerName: "Local", cellRenderer: statusCell, flex: 1, minWidth: 120 },
+      { field: "paypalStatus", headerName: "PayPal", headerTooltip: "PayPal status at the last reconciliation", cellRenderer: statusCell, flex: 1.1, minWidth: 120 },
+      { ...moneyColumn<Transaction>("Amount", (t) => t.amount), flex: 0.9, minWidth: 100 },
+      { field: "captureId", cellRenderer: monoCell, flex: 1.4, minWidth: 160 },
+      { field: "lastUpdatedBy", headerName: "Source", headerTooltip: "What last changed our record", flex: 0.8, minWidth: 90 },
+      { field: "lastReconciledAt", headerName: "Reconciled", valueFormatter: (p) => shortTime(p.value), flex: 1, minWidth: 120 },
+      { field: "updatedAt", headerName: "Updated", valueFormatter: (p) => shortTime(p.value), flex: 1, minWidth: 120, sort: "desc" },
     ],
     []
   );
@@ -369,6 +483,7 @@ export default function Dashboard() {
       paginationPageSize: 10,
       paginationPageSizeSelector: [10, 25, 50],
       suppressCellFocus: true,
+      loading: !loaded,
     };
     switch (tab) {
       case "incidents":
@@ -410,219 +525,314 @@ export default function Dashboard() {
 
   const selectedTx = transactions.find((t) => t.orderId === selectedOrder) ?? null;
 
-  const tabs: [Tab, string, number][] = [
-    ["incidents", "Incidents", openIncidents.length],
-    ["transactions", "Transactions", transactions.length],
-    ["events", "Webhook events", events.length],
-    ["actions", "Recovery actions", actions.length],
+  const navItems: { key: Tab; label: string; icon: "incidents" | "transactions" | "events" | "actions"; count: number; alert?: boolean }[] = [
+    { key: "incidents", label: "Incidents", icon: "incidents", count: openIncidents.length, alert: openIncidents.length > 0 },
+    { key: "transactions", label: "Transactions", icon: "transactions", count: transactions.length },
+    { key: "events", label: "Webhook events", icon: "events", count: events.length },
+    { key: "actions", label: "Recovery actions", icon: "actions", count: pendingApproval },
+  ];
+  const section = SECTIONS[tab];
+
+  const reconcileAll = () =>
+    run("reconcile", async () => {
+      const r = await api.reconcileAll();
+      const failed = r.errors.length ? `, ${r.errors.length} could not be checked` : "";
+      setNotice({ kind: r.errors.length ? "error" : "ok", text: `Checked ${r.reconciled} orders against PayPal: ${r.inSync} in sync${failed}` });
+    });
+
+  const connections: [string, string, boolean | null][] = [
+    ["PayPal", config?.paypalClientId ? "Sandbox" : "Not configured", !!config?.paypalClientId],
+    ["Webhooks", verifiedEvents ? `${verifiedEvents} verified` : "No events yet", verifiedEvents > 0 ? true : null],
+    ["AI", config?.aiProvider === "anthropic" ? "Claude" : config?.aiProvider === "openai" ? "OpenAI" : "Not configured", !!config?.aiProvider],
+    ["Approvals", config?.passcodeRequired ? "Passcode on" : "Open", !!config?.passcodeRequired],
   ];
 
   return (
-    <div className="min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      <header className="sticky top-0 z-40 border-b border-zinc-200 bg-white/85 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/85">
-        <div className="flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6 2xl:px-10">
-          <div className="flex items-center gap-3">
-            <Logo />
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-semibold tracking-tight">PayTrace AI</h1>
-                <Tag tone="amber">Sandbox</Tag>
-              </div>
-              <p className="text-xs text-zinc-500">Payment observability and recovery for PayPal merchants</p>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="hidden items-center gap-1.5 text-xs text-zinc-500 md:inline-flex">
-              <span className="size-1.5 rounded-full bg-emerald-500" />
-              {secondsSinceRefresh === null ? "Connecting..." : `Live, updated ${secondsSinceRefresh}s ago`}
-            </span>
-            <ThemeToggle value={themePreference} onChange={(v: ThemePreference) => setThemePreference(v)} />
-            <input value={actor} onChange={(e) => setActor(e.target.value)} placeholder="Acting as (your name)" aria-label="Acting as" className={`${input} w-44`} />
-            {config?.passcodeRequired && (
-              <input
-                type="password"
-                value={passcode}
-                onChange={(e) => updatePasscode(e.target.value)}
-                placeholder="Approver passcode"
-                aria-label="Approver passcode"
-                className={`${input} w-40`}
-              />
-            )}
-            <button
-              onClick={() =>
-                run("reconcile", async () => {
-                  const r = await api.reconcileAll();
-                  const failed = r.errors.length ? `, ${r.errors.length} could not be checked` : "";
-                  setNotice({ kind: r.errors.length ? "error" : "ok", text: `Checked ${r.reconciled} orders against PayPal: ${r.inSync} in sync${failed}` });
-                })
-              }
-              disabled={busy !== null}
-              className={button.primary}
-            >
-              <Icon name="refresh" className={`size-3.5 ${busy === "reconcile" ? "animate-spin" : ""}`} />
-              {busy === "reconcile" ? "Reconciling..." : "Reconcile all"}
-            </button>
+    <div className="flex min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+      <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-zinc-200 bg-white lg:flex dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex h-14 items-center gap-2.5 border-b border-zinc-200 px-4 dark:border-zinc-800">
+          <Logo />
+          <div className="leading-tight">
+            <div className="text-[14px] font-semibold tracking-tight">PayTrace</div>
+            <div className="text-[11px] text-zinc-500">Payment operations</div>
           </div>
         </div>
-      </header>
 
-      <main className="flex w-full flex-col gap-5 px-4 py-5 sm:px-6 2xl:px-10">
-        <section className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-          <Kpi
-            label="Open incidents"
-            value={openIncidents.length}
-            sub={criticalOpen ? `${criticalOpen} critical` : "nothing critical"}
-            alert={openIncidents.length > 0}
-            onClick={() => setTab("incidents")}
-          />
-          <Kpi
-            label="Money at risk"
-            value={
-              atRisk.length ? (
-                <>
-                  <span className="mr-1 text-[0.6em] font-medium">{atRisk[0][0]}</span>
-                  {atRisk[0][1].toFixed(2)}
-                </>
-              ) : (
-                "0.00"
-              )
-            }
-            sub={
-              atRisk.length > 1
-                ? `+ ${atRisk.slice(1).map(([c, v]) => `${c} ${v.toFixed(2)}`).join(", ")}`
-                : "across open incidents"
-            }
-            alert={atRisk.length > 0}
-          />
-          <Kpi label="Awaiting approval" value={pendingApproval} sub="proposed recovery actions" onClick={() => setTab("actions")} />
-          <Kpi
-            label="Reconciliation"
-            value={checked.length ? `${checked.length - mismatched}/${checked.length}` : "-"}
-            sub={mismatched ? `${mismatched} out of sync with PayPal` : "orders in sync with PayPal"}
-            alert={mismatched > 0}
-            onClick={() => setTab("transactions")}
-          />
-          <Kpi
-            label="Webhook events"
-            value={events.length}
-            sub={`${failedEvents} failed, ${duplicateDeliveries} duplicates absorbed`}
-            onClick={() => setTab("events")}
-          />
-        </section>
-
-        <section className="grid gap-3 lg:grid-cols-5">
-          <Card title="Test checkout" className="lg:col-span-2" aside={<span className="text-xs text-zinc-500">PayPal Sandbox buyer</span>}>
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                value={newOrder.amount}
-                onChange={(e) => setNewOrder({ ...newOrder, amount: e.target.value })}
-                aria-label="Amount"
-                className={`${input} w-24 tabular-nums`}
-              />
-              <select
-                value={newOrder.currency}
-                onChange={(e) => setNewOrder({ ...newOrder, currency: e.target.value })}
-                aria-label="Currency"
-                className={input}
-              >
-                {CURRENCIES.map((c) => (
-                  <option key={c}>{c}</option>
-                ))}
-              </select>
-              <button
-                disabled={busy !== null}
-                onClick={() =>
-                  run("create", async () => {
-                    const r = await api.createOrder(newOrder.amount, newOrder.currency);
-                    setApproveUrl(r.approveUrl);
-                    setNotice({ kind: "ok", text: `Created order ${r.orderId} without paying. Approve it, then capture it from Transactions.` });
-                  })
-                }
-                className={button.secondary}
-              >
-                Create order only
-              </button>
-            </div>
-            {config?.paypalClientId && /^\d+(\.\d{1,2})?$/.test(newOrder.amount) && (
-              <div className="mt-3 max-w-sm">
-                <PayPalCheckout
-                  clientId={config.paypalClientId}
-                  amount={newOrder.amount}
-                  currency={newOrder.currency}
-                  onCaptured={(orderId, status) => {
-                    setNotice({ kind: "ok", text: `Paid with PayPal: order ${orderId}, capture ${status ?? "submitted"}` });
-                    void refresh();
-                  }}
-                  onError={(message) => setNotice({ kind: "error", text: message })}
-                />
-              </div>
-            )}
-            {approveUrl && (
-              <a href={approveUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-[13px] font-medium text-sky-700 underline-offset-2 hover:underline dark:text-sky-400">
-                Open PayPal approval page
-              </a>
-            )}
-          </Card>
-
-          <Card title="How an incident gets handled" className="lg:col-span-3">
-            <ol className="grid text-xs sm:grid-cols-5 sm:divide-x sm:divide-zinc-200 dark:sm:divide-zinc-800">
-              {[
-                ["Detect", "Reconciliation compares live PayPal state with our record."],
-                ["Investigate", "AI reads the evidence and explains cause and impact."],
-                ["Propose", "AI and the system can suggest fixes, nothing more."],
-                ["Approve", "A person decides. Refunds need a second confirmation."],
-                ["Execute", "PayPal is re-checked, the fix runs, every step is logged."],
-              ].map(([title, text], i) => (
-                <li key={title} className="py-2 sm:px-3 sm:py-0 sm:first:pl-0 sm:last:pr-0">
-                  <div className="font-mono text-[11px] text-zinc-400">0{i + 1}</div>
-                  <div className="mt-0.5 text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">{title}</div>
-                  <p className="mt-1 leading-relaxed text-zinc-500">{text}</p>
-                </li>
-              ))}
-            </ol>
-          </Card>
-        </section>
-
-        <section className="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800">
-            <nav className="flex flex-wrap gap-0.5 rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800/70" aria-label="Views">
-              {tabs.map(([key, label, count]) => (
-                <button
-                  key={key}
-                  onClick={() => setTab(key)}
-                  className={`flex items-center gap-2 rounded-[5px] px-3 py-1.5 text-[13px] font-medium transition-colors ${
-                    tab === key
-                      ? "bg-white text-zinc-900 shadow-[0_1px_2px_rgba(0,0,0,0.08)] dark:bg-zinc-950 dark:text-zinc-100"
-                      : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+        <nav className="flex-1 overflow-y-auto px-2 py-4" aria-label="Sections">
+          <div className="px-2 pb-1.5 text-[11px] font-medium uppercase tracking-[0.06em] text-zinc-400">Operations</div>
+          {navItems.map((item) => (
+            <button
+              key={item.key}
+              onClick={() => setTab(item.key)}
+              aria-current={tab === item.key ? "page" : undefined}
+              className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] transition-colors ${
+                tab === item.key
+                  ? "bg-zinc-100 font-medium text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
+                  : "text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/50 dark:hover:text-zinc-100"
+              }`}
+            >
+              <Icon name={item.icon} className="size-4 shrink-0 opacity-80" />
+              <span className="flex-1 text-left">{item.label}</span>
+              {item.count > 0 && (
+                <span
+                  className={`min-w-5 rounded px-1 text-center text-[11px] font-medium tabular-nums ${
+                    item.alert ? "bg-red-600 text-white" : "text-zinc-500"
                   }`}
                 >
-                  {label}
-                  <span
-                    className={`min-w-5 rounded-[3px] px-1 text-center text-[11px] font-medium tabular-nums ${
-                      key === "incidents" && count > 0 ? "bg-red-600 text-white" : "bg-zinc-200/80 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300"
-                    }`}
-                  >
-                    {count}
-                  </span>
+                  {item.count}
+                </span>
+              )}
+            </button>
+          ))}
+
+          <div className="mt-6 px-2 pb-1.5 text-[11px] font-medium uppercase tracking-[0.06em] text-zinc-400">Sandbox</div>
+          <button
+            onClick={() => setCheckoutOpen(true)}
+            className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/50 dark:hover:text-zinc-100"
+          >
+            <Icon name="plus" className="size-4 shrink-0 opacity-80" />
+            New test payment
+          </button>
+        </nav>
+
+        <div className="border-t border-zinc-200 px-4 py-3 dark:border-zinc-800">
+          <div className="pb-2 text-[11px] font-medium uppercase tracking-[0.06em] text-zinc-400">Connections</div>
+          <dl className="space-y-1.5 text-xs">
+            {connections.map(([name, value, ok]) => (
+              <div key={name} className="flex items-center justify-between gap-2">
+                <dt className="text-zinc-500">{name}</dt>
+                <dd className="flex items-center gap-1.5 text-zinc-700 dark:text-zinc-300">
+                  <span className={`size-1.5 rounded-full ${ok === true ? "bg-emerald-500" : ok === false ? "bg-amber-500" : "bg-zinc-300 dark:bg-zinc-600"}`} />
+                  {value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+          <div className="mt-3 flex items-center justify-between">
+            <span className="text-xs text-zinc-500">Theme</span>
+            <ThemeToggle value={themePreference} onChange={(v: ThemePreference) => setThemePreference(v)} />
+          </div>
+        </div>
+      </aside>
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="sticky top-0 z-40 flex h-14 items-center justify-between gap-3 border-b border-zinc-200 bg-white/90 px-4 backdrop-blur sm:px-6 2xl:px-10 dark:border-zinc-800 dark:bg-zinc-900/90">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="lg:hidden">
+              <Logo />
+            </div>
+            <div className="truncate text-[13px]">
+              <span className="text-zinc-500">Operations</span>
+              <span className="mx-1.5 text-zinc-300 dark:text-zinc-600">/</span>
+              <span className="font-medium">{section.title}</span>
+            </div>
+            <Tag tone="amber">Sandbox</Tag>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="hidden items-center gap-1.5 text-xs text-zinc-500 xl:inline-flex">
+              <span className="size-1.5 rounded-full bg-emerald-500" />
+              {secondsSinceRefresh === null ? "Connecting" : `Updated ${secondsSinceRefresh}s ago`}
+            </span>
+            <IdentityMenu
+              actor={actor}
+              onActorChange={setActor}
+              passcodeRequired={!!config?.passcodeRequired}
+              passcode={passcode}
+              onPasscodeChange={updatePasscode}
+            />
+            <button onClick={reconcileAll} disabled={busy !== null} className={button.primary}>
+              <Icon name="refresh" className={`size-3.5 ${busy === "reconcile" ? "animate-spin" : ""}`} />
+              <span className="hidden sm:inline">{busy === "reconcile" ? "Reconciling" : "Reconcile all"}</span>
+            </button>
+          </div>
+        </header>
+
+        <main className="flex flex-col gap-6 px-4 py-6 sm:px-6 2xl:px-10">
+          <section className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-zinc-200 bg-zinc-200 sm:grid-cols-3 xl:grid-cols-5 dark:border-zinc-800 dark:bg-zinc-800">
+            <Stat
+              loading={!loaded}
+              label="Open incidents"
+              value={openIncidents.length}
+              sub={criticalOpen ? `${criticalOpen} critical` : "None critical"}
+              alert={openIncidents.length > 0}
+              onClick={() => setTab("incidents")}
+            />
+            <Stat
+              loading={!loaded}
+              label="Money at risk"
+              value={atRisk.length ? formatAmount(atRisk[0][0], atRisk[0][1]) : formatAmount("USD", 0)}
+              sub={atRisk.length > 1 ? `+ ${atRisk.slice(1).map(([c, v]) => formatAmount(c, v)).join(", ")}` : "Across open incidents"}
+              alert={atRisk.length > 0}
+            />
+            <Stat loading={!loaded} label="Awaiting approval" value={pendingApproval} sub="Proposed recovery actions" onClick={() => setTab("actions")} />
+            <Stat
+              loading={!loaded}
+              label="In sync with PayPal"
+              value={checked.length ? `${checked.length - mismatched} / ${checked.length}` : "-"}
+              sub={mismatched ? `${mismatched} out of sync` : checked.length ? "All orders match" : "Not reconciled yet"}
+              alert={mismatched > 0}
+              meter={checked.length ? { ratio: (checked.length - mismatched) / checked.length, tone: mismatched ? "red" : "green" } : undefined}
+              onClick={() => setTab("transactions")}
+            />
+            <Stat
+              loading={!loaded}
+              label="Webhook events"
+              value={events.length}
+              sub={`${failedEvents} failed, ${duplicateDeliveries} duplicates absorbed`}
+              meter={events.length ? { ratio: verifiedEvents / events.length, tone: "green" } : undefined}
+              onClick={() => setTab("events")}
+            />
+          </section>
+
+          <section className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h1 className="text-[17px] font-semibold tracking-tight">{section.title}</h1>
+                <p className="mt-0.5 text-[13px] text-zinc-500">{section.description}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="relative">
+                  <Icon name="search" className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-zinc-400" />
+                  <input
+                    type="search"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Filter by order, capture or event"
+                    aria-label="Filter rows"
+                    className={`${input} w-64 pl-8`}
+                  />
+                </label>
+                {tab === "transactions" && (
+                  <button onClick={() => setCheckoutOpen(true)} className={button.secondary}>
+                    <Icon name="plus" className="size-3.5" /> Test payment
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <nav className="flex gap-1 overflow-x-auto lg:hidden" aria-label="Sections">
+              {navItems.map((item) => (
+                <button
+                  key={item.key}
+                  onClick={() => setTab(item.key)}
+                  className={`whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] ${
+                    tab === item.key ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "text-zinc-600 dark:text-zinc-400"
+                  }`}
+                >
+                  {item.label} <span className="tabular-nums opacity-70">{item.count}</span>
                 </button>
               ))}
             </nav>
-            <label className="relative">
-              <Icon name="search" className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-zinc-400" />
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search orders, captures, events..."
-                aria-label="Search grid"
-                className={`${input} w-72 pl-8`}
-              />
-            </label>
+
+            <div className="flex items-start gap-6">
+              <div className="min-w-0 flex-1 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+                {/* keyed per tab: each view gets its own grid instance, otherwise column state leaks between tabs */}
+                <div key={tab}>{grid}</div>
+              </div>
+
+              <aside className="hidden w-80 shrink-0 2xl:block" aria-label="Recent activity">
+                <div className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+                  <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+                    <h2 className="text-[13px] font-semibold">Activity</h2>
+                    <span className="text-xs text-zinc-500">Latest {activity.length}</span>
+                  </div>
+                  {activity.length === 0 ? (
+                    <p className="px-4 py-6 text-[13px] text-zinc-500">Nothing yet. Payments, incidents and approvals show up here.</p>
+                  ) : (
+                    <ol className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                      {activity.map((item) => (
+                        <li key={item.key}>
+                          <button
+                            onClick={() => item.incidentId && setSelectedIncident(item.incidentId)}
+                            disabled={!item.incidentId}
+                            className="flex w-full gap-3 px-4 py-2.5 text-left transition-colors enabled:hover:bg-zinc-50 dark:enabled:hover:bg-zinc-800/50"
+                          >
+                            <span className={`mt-1.5 size-1.5 shrink-0 rounded-full ${ACTIVITY_DOT[item.tone]}`} />
+                            <span className="min-w-0 flex-1">
+                              <span className="block text-[13px] leading-snug text-zinc-800 dark:text-zinc-200">{item.title}</span>
+                              <span className="mt-0.5 block truncate text-xs text-zinc-500">{item.detail}</span>
+                            </span>
+                            <time className="shrink-0 text-xs tabular-nums text-zinc-400" dateTime={item.at} title={new Date(item.at).toLocaleString()}>
+                              {relativeTime(item.at)}
+                            </time>
+                          </button>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
+              </aside>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      {checkoutOpen && (
+        <Modal
+          title="New test payment"
+          description="Pays a sandbox order with a PayPal test buyer account. Nothing real is charged."
+          onClose={() => setCheckoutOpen(false)}
+        >
+          <div className="flex items-center gap-2">
+            <input
+              value={newOrder.amount}
+              onChange={(e) => setNewOrder({ ...newOrder, amount: e.target.value })}
+              aria-label="Amount"
+              className={`${input} w-28 tabular-nums`}
+            />
+            <select
+              value={newOrder.currency}
+              onChange={(e) => setNewOrder({ ...newOrder, currency: e.target.value })}
+              aria-label="Currency"
+              className={input}
+            >
+              {CURRENCIES.map((c) => (
+                <option key={c}>{c}</option>
+              ))}
+            </select>
           </div>
-          {/* keyed per tab: each view gets its own grid instance, otherwise column state leaks between tabs */}
-          <div key={tab}>{grid}</div>
-        </section>
-      </main>
+          {config?.paypalClientId && /^\d+(\.\d{1,2})?$/.test(newOrder.amount) ? (
+            <div className="mt-4">
+              <PayPalCheckout
+                clientId={config.paypalClientId}
+                amount={newOrder.amount}
+                currency={newOrder.currency}
+                onCaptured={(orderId, status) => {
+                  setCheckoutOpen(false);
+                  setTab("transactions");
+                  setNotice({ kind: "ok", text: `Paid with PayPal: order ${orderId}, capture ${status ?? "submitted"}` });
+                  void refresh();
+                }}
+                onError={(message) => setNotice({ kind: "error", text: message })}
+              />
+            </div>
+          ) : (
+            <p className="mt-4 text-xs text-zinc-500">Enter an amount like 10.00 to load the PayPal button.</p>
+          )}
+          <div className="mt-4 flex items-center gap-3 border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">
+            <button
+              disabled={busy !== null}
+              onClick={() =>
+                run("create", async () => {
+                  const r = await api.createOrder(newOrder.amount, newOrder.currency);
+                  setApproveUrl(r.approveUrl);
+                  setNotice({ kind: "ok", text: `Created order ${r.orderId} without paying. Approve it, then capture it from Transactions.` });
+                })
+              }
+              className={button.secondary}
+            >
+              Create order only
+            </button>
+            {approveUrl ? (
+              <a href={approveUrl} target="_blank" rel="noopener noreferrer" className="font-medium text-sky-700 hover:underline dark:text-sky-400">
+                Open approval page
+              </a>
+            ) : (
+              <span>Leaves it unpaid, for testing approval and capture separately.</span>
+            )}
+          </div>
+        </Modal>
+      )}
 
       <Toast notice={notice} onClose={dismissNotice} />
 

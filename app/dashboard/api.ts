@@ -52,6 +52,7 @@ const rows = <T,>(url: string) => call<{ rows: T[] }>(url).then((d) => d.rows);
 
 export const api = {
   config: () => call<AppConfig>("/api/config"),
+  checkPasscode: () => call("/api/auth/check", { method: "POST", body: {} }),
   transactions: () => rows<Transaction>("/api/transactions"),
   events: () => rows<EventRow>("/api/webhook-events"),
   incidents: () => rows<Incident>("/api/incidents"),

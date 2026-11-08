@@ -26,6 +26,53 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern", "liga", "calt";
+}
+
+/* numbers in tables and stats shouldn't shift width as they change */
+.tabular-nums,
+.ag-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: rgb(24 24 27 / 0.12);
+}
+.dark ::selection {
+  background: rgb(244 244 245 / 0.18);
+}
+
+/* keyboard focus only; mouse clicks don't get a ring */
+:focus-visible {
+  outline: 2px solid #18181b;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.dark :focus-visible {
+  outline-color: #f4f4f5;
+}
+input:focus-visible,
+select:focus-visible {
+  outline: none; /* inputs have their own focus ring */
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(161 161 170 / 0.5) transparent;
+}
+
+/* grid header tools appear on hover; an active filter stays visible */
+.ag-header-cell .ag-header-cell-filter-button,
+.ag-header-cell .ag-header-cell-menu-button {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.ag-header-cell:hover .ag-header-cell-filter-button,
+.ag-header-cell:hover .ag-header-cell-menu-button,
+.ag-header-cell:focus-within .ag-header-cell-filter-button,
+.ag-header-cell .ag-header-cell-filter-button.ag-filter-active {
+  opacity: 1;
 }
 
 @keyframes slide-in {
